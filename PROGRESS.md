@@ -3,6 +3,8 @@
 Turns off-plan brochure PDFs and listing URLs into a source-faithful, walkable 3D model of one unit.
 Every wall, room and finish links back to the page or render that justifies it; anything not printed is marked inferred.
 
+Full handoff notes (gateway setup, cost, results, deployment, backups) are in [`docs/`](docs/README.md).
+
 ## Architecture (10 bullets)
 
 1. **Next.js 15 App Router + TypeScript + Tailwind 4**; the 3D viewer is React Three Fiber + drei, loaded client-only (`ViewerDynamic`).

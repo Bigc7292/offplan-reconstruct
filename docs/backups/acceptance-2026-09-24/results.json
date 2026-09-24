@@ -1,0 +1,73 @@
+{
+  "base": "http://localhost:3100",
+  "demoId": "20260924-e64f256b",
+  "pdfId": "20260924-85edc795",
+  "results": [
+    {
+      "step": "A1 demo model generated",
+      "ok": true,
+      "detail": "12 rooms, 20 walls, hash c41e92bc98519611"
+    },
+    {
+      "step": "A2 wall length edit updates the 3D model",
+      "ok": true,
+      "detail": "wall 6.40 → 6.90 m; hash c41e92bc98519611 → 825a5ff14ae67a0a; bounds changed by 0.00 m"
+    },
+    {
+      "step": "A3 walk living → kitchen → master (WASD, with collisions)",
+      "ok": true,
+      "detail": "Living / Dining → Kitchen → Master Bedroom"
+    },
+    {
+      "step": "A3b walls collide",
+      "ok": true,
+      "detail": "pressed into the east wall (x=13.4): stopped at x=13.03"
+    },
+    {
+      "step": "A4 kitchen floor shows its evidence",
+      "ok": true,
+      "detail": "Kitchenfloor · kitchen · Level 22 (DEMO)attested×Area12.16 m² (documented)Computed12.16 m²Ceiling3.00 mMaterialPale limestone (DEMO)Geometry evidenceuserdemo:sa"
+    },
+    {
+      "step": "A5 GLB export",
+      "ok": true,
+      "detail": "135 KB, 0 errors, 0 warnings"
+    },
+    {
+      "step": "A6 reload and rebuild give the identical scene graph",
+      "ok": true,
+      "detail": "41426 bytes, hash ae968124547daba6"
+    },
+    {
+      "step": "A7 share page renders",
+      "ok": true,
+      "detail": "/view/20260924-e64f256b"
+    },
+    {
+      "step": "B1 PDF + URL ingested",
+      "ok": true,
+      "detail": "pdf:ok, url:ok; 14 pages in 24 s"
+    },
+    {
+      "step": "B2 every page classified",
+      "ok": true,
+      "detail": "p1:other p2:specs_schedule p3:specs_schedule p4:location p5:cgi_interior p6:cgi_interior p7:cgi_interior p8:specs_schedule p9:unit_plan p10:unit_plan p11:other p12:location+other p13:other p14:specs_schedule"
+    },
+    {
+      "step": "B3 room schedule with evidence",
+      "ok": true,
+      "detail": "16 rooms on 4 levels, 16 with page evidence, 0 with an area"
+    },
+    {
+      "step": "B4 key facts extracted",
+      "ok": true,
+      "detail": "area.bua_m2=1580; area.bua_sqft=17012; area.plot_m2=869; area.plot_sqft=9357; service_charge_aed_per_sqft=2.5; unit.type=VILLA TYPE 4; beds=5; storeys=B+G+2"
+    },
+    {
+      "step": "no browser errors",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "errors": []
+}
