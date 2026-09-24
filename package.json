@@ -1,0 +1,44 @@
+{
+  "name": "offplan-reconstruct",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx scripts/acceptance.ts",
+    "smoke": "tsx scripts/smoke.ts",
+    "ingest-test": "tsx scripts/ingest-test.ts",
+    "demo-plan": "tsx scripts/make-demo-plan.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "@napi-rs/canvas": "^0.1.100",
+    "@react-three/drei": "^10.7.8",
+    "@react-three/fiber": "^9.8.0",
+    "next": "15.5",
+    "pdfjs-dist": "5.4",
+    "playwright-core": "1.56",
+    "react": "19.1",
+    "react-dom": "19.1",
+    "sharp": "^0.35.4",
+    "swr": "^2.5.1",
+    "three": "^0.180.0",
+    "zod": "^3.25.76",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^26.6.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/three": "^0.186.0",
+    "gltf-validator": "^2.0.0-dev.3.10",
+    "postcss": "^8.5.28",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  },
+  "type": "module"
+}

@@ -1,0 +1,12 @@
+import { buildDemoDossier } from "@/lib/demo";
+import { reconstruct } from "@/lib/reconstruct";
+import { exportGlb } from "@/lib/export-glb";
+import fs from "fs";
+const d = buildDemoDossier("demo-test");
+const g = reconstruct(d);
+const g2 = reconstruct(buildDemoDossier("demo-test"));
+console.log("pieces", g.pieces.length, "rooms", g.rooms.length, "colliders", g.colliders.length, "deterministic", JSON.stringify(g) === JSON.stringify(g2));
+console.log(g.stats, g.warnings, g.spawn, g.bounds);
+const glb = exportGlb(g);
+fs.writeFileSync("/tmp/claude-0/demo.glb", glb);
+console.log("glb bytes", glb.length);
