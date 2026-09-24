@@ -45,7 +45,7 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
           <div className="text-[11px] text-stone-500">{job.sources.map((s) => s.name).join(" · ")}</div>
         </div>
         {job.demo && <span className="chip chip-inferred">DEMO</span>}
-        <span className="chip">{job.extractor === "claude" ? "Claude vision" : "local extractor"}</span>
+        <span className="chip">{job.extractorLabel ?? (job.extractor === "local" ? "local extractor" : job.extractor)}</span>
         <div className="ml-auto flex items-center gap-3 text-xs">
           <span className={saveError ? "text-danger" : "text-stone-500"} data-testid="save-state">{saveError || (saving ? "Saving…" : dirty ? "Unsaved" : "Saved")}</span>
           <label className="flex items-center gap-1.5 text-stone-300">

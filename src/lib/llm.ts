@@ -1,18 +1,39 @@
-// Claude multimodal calls. Structured outputs only: every call passes a Zod schema and
+// Multimodal model calls. Structured outputs only: every call passes a Zod schema and
 // the reply is parsed against it (free-form replies are rejected). Every call is logged
 // to the job's model-calls.jsonl with prompt, schema, and token usage.
 //
-// Active only when ANTHROPIC_API_KEY is set; otherwise the local extractor runs.
+// Providers (first match wins):
+//   LLM_PROVIDER=openai + LLM_BASE_URL + LLM_API_KEY + LLM_MODEL → any OpenAI-compatible
+//     chat-completions endpoint (e.g. a model gateway)
+//   ANTHROPIC_API_KEY → Claude via the Anthropic SDK
+//   neither → the local extractor runs and no model is called.
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import * as z from "zod/v4";
 import sharp from "sharp";
 import { logModelCall } from "./store";
 
-export const MODEL = process.env.ANTHROPIC_MODEL || "claude-opus-5";
+export type ExtractorKind = "claude" | "openai" | "local";
 
-export function extractorKind(): "claude" | "local" {
+const OPENAI = {
+  baseUrl: (process.env.LLM_BASE_URL ?? "").replace(/\/+$/, "").replace(/\/v1$/, ""),
+  key: process.env.LLM_API_KEY ?? "",
+  model: process.env.LLM_MODEL ?? "",
+};
+
+export function extractorKind(): ExtractorKind {
+  if (process.env.LLM_PROVIDER === "openai" && OPENAI.baseUrl && OPENAI.key && OPENAI.model) return "openai";
   return process.env.ANTHROPIC_API_KEY ? "claude" : "local";
+}
+
+export const MODEL = extractorKind() === "openai" ? OPENAI.model : process.env.ANTHROPIC_MODEL || "claude-opus-5";
+
+/** Human label for the UI, e.g. "gpt-6-astra via api.example.dev". */
+export function extractorLabel(): string {
+  const k = extractorKind();
+  if (k === "openai") return `${OPENAI.model} via ${new URL(OPENAI.baseUrl).hostname}`;
+  if (k === "claude") return `Claude (${MODEL})`;
+  return "local (no model)";
 }
 
 let client: Anthropic | null = null;
@@ -21,39 +42,91 @@ function getClient() {
   return client;
 }
 
-async function imageBlock(file: string) {
+async function imagePng(file: string) {
   // Vision input is capped at ~1568 px on the long edge; downscale here so tiny plan text keeps its detail budget.
-  const buf = await sharp(file).resize(1568, 1568, { fit: "inside", withoutEnlargement: true }).png().toBuffer();
-  return { type: "image" as const, source: { type: "base64" as const, media_type: "image/png" as const, data: buf.toString("base64") } };
+  return sharp(file).resize(1568, 1568, { fit: "inside", withoutEnlargement: true }).png().toBuffer();
 }
 
-export async function callStructured<S extends z.ZodType>(
-  jobId: string,
-  opts: { task: string; system: string; prompt: string; images?: string[]; schema: S; schemaName: string },
-): Promise<z.infer<S>> {
+type CallOpts<S> = { task: string; system: string; prompt: string; images?: string[]; schema: S; schemaName: string };
+
+export async function callStructured<S extends z.ZodType>(jobId: string, opts: CallOpts<S>): Promise<z.infer<S>> {
   const started = Date.now();
-  const content = [...(await Promise.all((opts.images ?? []).map(imageBlock))), { type: "text" as const, text: opts.prompt }];
   try {
-    const res = await getClient().messages.parse({
-      model: MODEL,
-      max_tokens: 16000,
-      thinking: { type: "adaptive" },
-      system: opts.system,
-      messages: [{ role: "user", content }],
-      output_config: { format: zodOutputFormat(opts.schema) },
-    });
+    const { parsed, usage, stop } = extractorKind() === "openai" ? await callOpenAI(opts) : await callClaude(opts);
     await logModelCall(jobId, {
       task: opts.task, model: MODEL, schema: opts.schemaName, system: opts.system, prompt: opts.prompt,
-      images: opts.images, usage: res.usage, stop_reason: res.stop_reason, ms: Date.now() - started,
+      images: opts.images, usage, stop_reason: stop, ms: Date.now() - started,
     });
-    if (res.stop_reason === "refusal") throw new Error(`Model declined the ${opts.task} request.`);
-    if (res.stop_reason === "max_tokens") throw new Error(`Model output for ${opts.task} was cut off (max_tokens).`);
-    if (!res.parsed_output) throw new Error(`Model reply for ${opts.task} did not match schema ${opts.schemaName}.`);
-    return res.parsed_output as z.infer<S>;
+    return parsed;
   } catch (e) {
     await logModelCall(jobId, { task: opts.task, model: MODEL, schema: opts.schemaName, prompt: opts.prompt, images: opts.images, error: String(e), ms: Date.now() - started });
     throw e;
   }
+}
+
+async function callClaude<S extends z.ZodType>(opts: CallOpts<S>) {
+  const images = await Promise.all((opts.images ?? []).map(imagePng));
+  const content = [
+    ...images.map((b) => ({ type: "image" as const, source: { type: "base64" as const, media_type: "image/png" as const, data: b.toString("base64") } })),
+    { type: "text" as const, text: opts.prompt },
+  ];
+  const res = await getClient().messages.parse({
+    model: MODEL,
+    max_tokens: 16000,
+    thinking: { type: "adaptive" },
+    system: opts.system,
+    messages: [{ role: "user", content }],
+    output_config: { format: zodOutputFormat(opts.schema) },
+  });
+  if (res.stop_reason === "refusal") throw new Error(`Model declined the ${opts.task} request.`);
+  if (res.stop_reason === "max_tokens") throw new Error(`Model output for ${opts.task} was cut off (max_tokens).`);
+  if (!res.parsed_output) throw new Error(`Model reply for ${opts.task} did not match schema ${opts.schemaName}.`);
+  return { parsed: res.parsed_output as z.infer<S>, usage: res.usage, stop: res.stop_reason };
+}
+
+/** OpenAI-compatible chat completions with a JSON-schema response format, validated with Zod. */
+async function callOpenAI<S extends z.ZodType>(opts: CallOpts<S>) {
+  const images = await Promise.all((opts.images ?? []).map(imagePng));
+  const jsonSchema = z.toJSONSchema(opts.schema);
+  const user = [
+    ...images.map((b) => ({ type: "image_url", image_url: { url: `data:image/png;base64,${b.toString("base64")}` } })),
+    { type: "text", text: opts.prompt },
+  ];
+  const body = (format: "json_schema" | "json_object") => ({
+    model: OPENAI.model,
+    max_tokens: 16000,
+    messages: [
+      { role: "system", content: format === "json_schema" ? opts.system : `${opts.system}\n\nReply with one JSON object matching this JSON Schema, and nothing else:\n${JSON.stringify(jsonSchema)}` },
+      { role: "user", content: user },
+    ],
+    response_format: format === "json_schema"
+      ? { type: "json_schema", json_schema: { name: opts.schemaName.replace(/[^a-zA-Z0-9_-]/g, "_"), schema: jsonSchema, strict: false } }
+      : { type: "json_object" },
+  });
+  const post = async (format: "json_schema" | "json_object") => {
+    const res = await fetch(`${OPENAI.baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${OPENAI.key}` },
+      body: JSON.stringify(body(format)),
+      signal: AbortSignal.timeout(300_000),
+    });
+    const text = await res.text();
+    return { status: res.status, text };
+  };
+  let r = await post("json_schema");
+  // some gateways/models reject json_schema; fall back to JSON mode with the schema in the prompt
+  if (r.status === 400 && /response_format|json_schema/i.test(r.text)) r = await post("json_object");
+  if (r.status < 200 || r.status >= 300) throw new Error(`Model gateway returned ${r.status} for ${opts.task}: ${r.text.slice(0, 300)}`);
+  const data = JSON.parse(r.text);
+  const choice = data.choices?.[0];
+  if (choice?.finish_reason === "length") throw new Error(`Model output for ${opts.task} was cut off (max_tokens).`);
+  if (choice?.message?.refusal) throw new Error(`Model declined the ${opts.task} request.`);
+  const raw = String(choice?.message?.content ?? "").replace(/^```(?:json)?\s*|\s*```$/g, "");
+  let json: unknown;
+  try { json = JSON.parse(raw); } catch { throw new Error(`Model reply for ${opts.task} was not JSON.`); }
+  const parsed = opts.schema.safeParse(json);
+  if (!parsed.success) throw new Error(`Model reply for ${opts.task} did not match schema ${opts.schemaName}: ${parsed.error.issues.slice(0, 3).map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`);
+  return { parsed: parsed.data as z.infer<S>, usage: data.usage, stop: choice?.finish_reason };
 }
 
 // ───────────────────────── prompts & schemas used by the extract-* modules ─────────────────────────

@@ -20,7 +20,7 @@ Every wall, room and finish links back to the page or render that justifies it; 
 
 - **Phase 1 (vertical slice): done.** The DEMO unit (clearly labelled, not an extracted project) walks end to end.
 - **Phase 2 (ingest): done** for PDFs, images and public URLs, including linked PDFs and scanned/OCR pages.
-- **Phase 3 (intelligence): local extractor done; Claude vision path written but not yet run** (no API key in this environment). With a key, plan pages go to Claude with the draughtsman prompt and come back as walls/rooms/openings; without one, rooms arrive *unplaced* from the printed schedule and are traced by the reviewer over the calibrated plan.
+- **Phase 3 (intelligence): local extractor done; vision path written for two providers but not yet run against a real model.** Set `LLM_PROVIDER=openai`, `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL` in `.env.local` for any OpenAI-compatible gateway (configured for `gpt-6-astra` via OneProvider; `npm run llm-check` lists the gateway's models and confirms the ID), or `ANTHROPIC_API_KEY` for Claude. The build container's network policy blocks api.oneprovider.dev, so the gateway path is tested only against a local mock. Every model call falls back to the local extractor if it fails. With a key, plan pages go to Claude with the draughtsman prompt and come back as walls/rooms/openings; without one, rooms arrive *unplaced* from the printed schedule and are traced by the reviewer over the calibrated plan.
 - **Phase 4 (fidelity): partial.** CGI tone sampling per room program works; CGI crops are not yet used as textures.
 
 ## Acceptance run (`npm run build && npm start`, then `PDF=/path/brochure.pdf npm test`)
@@ -42,6 +42,6 @@ Last run 2026-09-24, headless Chromium with software WebGL: **13/13 passed.**
 ## Known gaps
 
 - Real brochures with the local extractor give room *names* per level but no geometry. Ninteen prints room sizes (e.g. "MAIN KITCHEN 5.4 X 3.8") only inside the plan images, which are embedded at about 640 px wide; OCR reads a few of them but not reliably, so they are not used. Geometry and sizes come from tracing in the plan editor, or from the Claude vision path.
-- The Claude path has no server-side fallback if a call fails mid-job; the stage errors and can be re-run from the review page.
+- Brochure pages are sent to whichever model gateway is configured. Don't upload documents with personal data (such as the title deed) while a third-party gateway is set.
 - The Al Barari renders PDF has no floor plan, so it yields finishes and captions only; the title deed yields registry facts only (and contains owner names: treat as sensitive).
 - Fonts load from Google Fonts; offline, the UI falls back to system fonts.

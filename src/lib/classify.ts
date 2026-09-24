@@ -121,7 +121,7 @@ export function captionFor(p: PageRecord, bbox: [number, number, number, number]
 export async function classifyAll(jobId: string) {
   const job = (await readJob(jobId))!;
   const assets = await readAssetIndex(jobId);
-  const useClaude = extractorKind() === "claude";
+  const useClaude = extractorKind() !== "local";
   const firstPages = new Set(job.sources.map((s) => job.pages.find((p) => p.sourceId === s.id)?.n));
   const assetStats = new Map<string, ImageStats>();
   for (const a of assets) assetStats.set(a.id, await imageStats(jobFile(jobId, a.path)));
@@ -138,7 +138,7 @@ export async function classifyAll(jobId: string) {
         });
         p.labels = out.labels.length ? out.labels : ["other"];
         p.labelConfidence = out.confidence;
-        p.labelReason = `Claude: ${out.reason}`;
+        p.labelReason = `Model: ${out.reason}`;
         p.caption = out.caption ?? p.caption;
       } catch (e) {
         await log(jobId, "classify", `Page ${p.n}: model classification failed (${e instanceof Error ? e.message : e}); using local classifier.`, "warn");

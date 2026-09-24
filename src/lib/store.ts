@@ -58,7 +58,7 @@ export function withJobLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-export async function createJob(init: Pick<Job, "title" | "unitFocus" | "notes" | "extractor" | "demo">): Promise<Job> {
+export async function createJob(init: Pick<Job, "title" | "unitFocus" | "notes" | "extractor" | "extractorLabel" | "demo">): Promise<Job> {
   const id = newJobId();
   const now = new Date().toISOString();
   const job: Job = {

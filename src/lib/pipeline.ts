@@ -7,7 +7,7 @@ import { buildDemoDossier } from "./demo";
 import { reconstruct } from "./reconstruct";
 import { exportGlb } from "./export-glb";
 import { normalizeDossier } from "./normalize";
-import { extractorKind } from "./llm";
+import { extractorKind, extractorLabel } from "./llm";
 
 const running = new Set<string>();
 
@@ -23,7 +23,7 @@ export async function startJob(input: NewJobInput): Promise<Job> {
   const title = input.demo
     ? "DEMO — 2BR + Maid sample unit"
     : input.files[0]?.name.replace(/\.[a-z0-9]+$/i, "") ?? (input.urls[0] ? new URL(input.urls[0]).hostname : "Untitled");
-  const job = await createJob({ title, unitFocus: input.unitFocus, notes: input.notes, extractor: input.demo ? "local" : extractorKind(), demo: input.demo });
+  const job = await createJob({ title, unitFocus: input.unitFocus, notes: input.notes, extractor: input.demo ? "local" : extractorKind(), extractorLabel: input.demo ? undefined : extractorLabel(), demo: input.demo });
   await setStage(job.id, "create", "running");
   const { registerSources } = await import("./ingest");
   await registerSources(job.id, input);

@@ -10,7 +10,8 @@
     "test": "tsx scripts/acceptance.ts",
     "smoke": "tsx scripts/smoke.ts",
     "ingest-test": "tsx scripts/ingest-test.ts",
-    "demo-plan": "tsx scripts/make-demo-plan.ts"
+    "demo-plan": "tsx scripts/make-demo-plan.ts",
+    "llm-check": "tsx --env-file=.env.local scripts/llm-check.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",

@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Brand, Footer } from "@/components/Brand";
 import { DropZone } from "@/components/DropZone";
 import { listJobs } from "@/lib/store";
-import { extractorKind } from "@/lib/llm";
+import { extractorKind, extractorLabel } from "@/lib/llm";
 
 export const dynamic = "force-dynamic";
 
@@ -13,8 +13,8 @@ export default async function Home() {
     <main className="min-h-screen flex flex-col">
       <header className="px-8 py-5 flex items-center justify-between border-b border-stone-800">
         <Brand />
-        <span className={`chip ${extractor === "claude" ? "chip-gold" : ""}`} title={extractor === "claude" ? "Vision extraction via Claude" : "Set ANTHROPIC_API_KEY to enable vision plan tracing"}>
-          extractor: {extractor === "claude" ? "Claude vision" : "local (no API key)"}
+        <span className={`chip ${extractor !== "local" ? "chip-gold" : ""}`} title={extractor !== "local" ? "Vision extraction on" : "Set a model key in .env.local to enable vision plan tracing"}>
+          extractor: {extractorLabel()}
         </span>
       </header>
       <section className="flex-1 max-w-5xl w-full mx-auto px-6 py-10 space-y-10">

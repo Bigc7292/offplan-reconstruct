@@ -6,14 +6,14 @@ import { readAssetIndex, type AssetIndexEntry } from "./ingest";
 import { claudeFacts, localFacts } from "./extract-facts";
 import { extractPlans } from "./extract-plan";
 import { extractMaterials } from "./extract-materials";
-import { extractorKind } from "./llm";
+import { extractorKind, extractorLabel } from "./llm";
 import { normalizeDossier } from "./normalize";
 
 export async function extractAll(jobId: string): Promise<PropertyDossier> {
   const job = (await readJob(jobId))!;
   const assets = (await readAssetIndex(jobId)) as Array<AssetIndexEntry & { kind: AssetKind; caption?: string }>;
-  const useClaude = extractorKind() === "claude";
-  await log(jobId, "extract", useClaude ? "Extractor: Claude vision (structured outputs)." : "Extractor: local (text layer, OCR, image signals). Set ANTHROPIC_API_KEY for vision plan tracing.");
+  const useClaude = extractorKind() !== "local";
+  await log(jobId, "extract", useClaude ? `Extractor: ${extractorLabel()} (vision, structured outputs).` : "Extractor: local (text layer, OCR, image signals). Set ANTHROPIC_API_KEY for vision plan tracing.");
   const d = emptyDossier(jobId);
   d.unitFocus = job.unitFocus;
 
