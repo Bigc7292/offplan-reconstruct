@@ -1,5 +1,6 @@
 // Stage 2: label every page (multi-label) and every extracted image asset.
 // Local classifier = keyword evidence from text/OCR + image signals. Claude classifier when a key is set.
+import { limiter, settle, MODEL_CONCURRENCY } from "./concurrency";
 import type { AssetKind, PageLabel, PageRecord } from "./schema";
 import { jobFile, log, readJob, updateJob, writeJobFile } from "./store";
 import { readAssetIndex, type AssetIndexEntry } from "./ingest";
@@ -126,16 +127,22 @@ export async function classifyAll(jobId: string) {
   const assetStats = new Map<string, ImageStats>();
   for (const a of assets) assetStats.set(a.id, await imageStats(jobFile(jobId, a.path)));
 
+  // start every page's model call up front, a few at a time; results are applied in page order
+  const run = limiter(MODEL_CONCURRENCY);
+  const modelOut = new Map(useClaude ? job.pages.map((p) => [p.n, settle(run(() => callStructured(jobId, {
+    task: `classify page ${p.n}`, system: CLASSIFY_SYSTEM, schema: ClassifySchema, schemaName: "PageClassification",
+    prompt: `Page ${p.n}. Extracted text (${p.textSource}):\n"""\n${p.text.slice(0, 6000)}\n"""`,
+    images: [jobFile(jobId, p.image)],
+  })))] as const) : []);
+
   for (const p of job.pages) {
     const mine = assets.filter((a) => a.page === p.n && a.origin === "pdf_crop");
     p.caption = p.caption ?? extractCaption(p);
     if (useClaude) {
       try {
-        const out = await callStructured(jobId, {
-          task: `classify page ${p.n}`, system: CLASSIFY_SYSTEM, schema: ClassifySchema, schemaName: "PageClassification",
-          prompt: `Page ${p.n}. Extracted text (${p.textSource}):\n"""\n${p.text.slice(0, 6000)}\n"""`,
-          images: [jobFile(jobId, p.image)],
-        });
+        const r = await modelOut.get(p.n)!;
+        if (!r.ok) throw r.error;
+        const out = r.value;
         p.labels = out.labels.length ? out.labels : ["other"];
         p.labelConfidence = out.confidence;
         p.labelReason = `Model: ${out.reason}`;

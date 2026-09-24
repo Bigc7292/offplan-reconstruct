@@ -3,6 +3,8 @@
 Turns off-plan brochure PDFs and listing URLs into a source-faithful, walkable 3D model of one unit.
 Every wall, room and finish links back to the page or render that justifies it; anything not printed is marked inferred.
 
+Full handoff notes (gateway setup, cost, results, deployment, backups) are in [`docs/`](docs/README.md).
+
 ## Architecture (10 bullets)
 
 1. **Next.js 15 App Router + TypeScript + Tailwind 4**; the 3D viewer is React Three Fiber + drei, loaded client-only (`ViewerDynamic`).
@@ -20,7 +22,7 @@ Every wall, room and finish links back to the page or render that justifies it; 
 
 - **Phase 1 (vertical slice): done.** The DEMO unit (clearly labelled, not an extracted project) walks end to end.
 - **Phase 2 (ingest): done** for PDFs, images and public URLs, including linked PDFs and scanned/OCR pages.
-- **Phase 3 (intelligence): local extractor done; vision path written for two providers but not yet run against a real model.** Set `LLM_PROVIDER=openai`, `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL` in `.env.local` for any OpenAI-compatible gateway (configured for `gpt-6-astra` via OneProvider; `npm run llm-check` lists the gateway's models and confirms the ID), or `ANTHROPIC_API_KEY` for Claude. The build container's network policy blocks api.oneprovider.dev, so the gateway path is tested only against a local mock. Every model call falls back to the local extractor if it fails. With a key, plan pages go to Claude with the draughtsman prompt and come back as walls/rooms/openings; without one, rooms arrive *unplaced* from the printed schedule and are traced by the reviewer over the calibrated plan.
+- **Phase 3 (intelligence): local extractor done; vision path written for two providers but not yet run against a real model.** Set `LLM_PROVIDER=openai`, `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL` in `.env.local` for any OpenAI-compatible gateway (configured for `gpt-6-astra` via OneProvider; `npm run llm-check` lists the gateway's models and confirms the ID), or `ANTHROPIC_API_KEY` for Claude. For OneProvider set `LLM_API=responses` (gpt-6-astra only answers on `/v1/responses`) and `LLM_REASONING_EFFORT=low` (the gateway drops calls whose first byte takes over ~30 s). In a Claude Code cloud environment the key is a stored credential injected by the egress proxy: `LLM_API_KEY` can be any placeholder, and the server and `llm-check` must run with `NODE_USE_ENV_PROXY=1` so Node's fetch goes through the proxy. Every model call falls back to the local extractor if it fails. With a key, plan pages go to Claude with the draughtsman prompt and come back as walls/rooms/openings; without one, rooms arrive *unplaced* from the printed schedule and are traced by the reviewer over the calibrated plan.
 - **Phase 4 (fidelity): partial.** CGI tone sampling per room program works; CGI crops are not yet used as textures.
 
 ## Acceptance run (`npm run build && npm start`, then `PDF=/path/brochure.pdf npm test`)

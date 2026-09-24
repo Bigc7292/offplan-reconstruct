@@ -1,0 +1,6 @@
+node_modules
+.next
+data
+scratch
+.env*
+!.env.example

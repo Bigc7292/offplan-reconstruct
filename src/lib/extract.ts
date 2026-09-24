@@ -1,13 +1,15 @@
 // Stage 3: build the Property Dossier from classified pages and assets.
 import type { Asset, AssetKind, PropertyDossier } from "./schema";
 import { emptyDossier } from "./schema";
-import { log, readJob, writeDossier, readDossier } from "./store";
+import { log, readJob, writeDossier, readDossier, writeJobFile } from "./store";
 import { readAssetIndex, type AssetIndexEntry } from "./ingest";
 import { claudeFacts, localFacts } from "./extract-facts";
 import { extractPlans } from "./extract-plan";
 import { extractMaterials } from "./extract-materials";
 import { extractorKind, extractorLabel } from "./llm";
 import { normalizeDossier } from "./normalize";
+import { reconstruct } from "./reconstruct";
+import { settle } from "./concurrency";
 
 export async function extractAll(jobId: string): Promise<PropertyDossier> {
   const job = (await readJob(jobId))!;
@@ -16,6 +18,21 @@ export async function extractAll(jobId: string): Promise<PropertyDossier> {
   await log(jobId, "extract", useClaude ? `Extractor: ${extractorLabel()} (vision, structured outputs).` : "Extractor: local (text layer, OCR, image signals). Set ANTHROPIC_API_KEY for vision plan tracing.");
   const d = emptyDossier(jobId);
   d.unitFocus = job.unitFocus;
+
+  // assets → dossier
+  d.assets = assets.map<Asset>((a) => ({ id: a.id, kind: a.kind, path: a.path, caption: a.caption, page: a.page }));
+  for (const p of job.pages) {
+    // scanned single-image pages have no crops: the page itself is the asset
+    if (!assets.some((a) => a.page === p.n)) {
+      const kind: AssetKind = p.labels.includes("cgi_interior") ? "cgi_interior" : p.labels.includes("cgi_exterior") ? "cgi_exterior" : p.labels.includes("unit_plan") ? "unit_plan" : "other";
+      const pageAsset = { id: `page-${p.n}`, kind, path: p.image, caption: p.caption, page: p.n };
+      d.assets.push(pageAsset);
+      assets.push({ ...pageAsset, bbox: [0, 0, 1, 1], hash: "", w: p.widthPx, h: p.heightPx, sourceId: p.sourceId, origin: "page" });
+    }
+  }
+
+  // C. materials read the renders independently of facts and plans, so start them now
+  const matsP = settle(extractMaterials(jobId, job.pages, assets, useClaude));
 
   // A. facts (local pass always runs: it keeps every paragraph; Claude adds structured facts on top)
   const lf = localFacts(job.pages, job.sources.map((s) => s.meta));
@@ -40,21 +57,10 @@ export async function extractAll(jobId: string): Promise<PropertyDossier> {
   }
   for (const f of d.facts.slice(0, 200)) await log(jobId, "extract", `${f.key} = ${f.value}  [${f.evidence[0]?.ref}]`, "fact");
 
-  // assets → dossier
-  d.assets = assets.map<Asset>((a) => ({ id: a.id, kind: a.kind, path: a.path, caption: a.caption, page: a.page }));
-  for (const p of job.pages) {
-    // scanned single-image pages have no crops: the page itself is the asset
-    if (!assets.some((a) => a.page === p.n)) {
-      const kind: AssetKind = p.labels.includes("cgi_interior") ? "cgi_interior" : p.labels.includes("cgi_exterior") ? "cgi_exterior" : p.labels.includes("unit_plan") ? "unit_plan" : "other";
-      const pageAsset = { id: `page-${p.n}`, kind, path: p.image, caption: p.caption, page: p.n };
-      d.assets.push(pageAsset);
-      assets.push({ ...pageAsset, bbox: [0, 0, 1, 1], hash: "", w: p.widthPx, h: p.heightPx, sourceId: p.sourceId, origin: "page" });
-    }
-  }
-
   // B. plans
   const ceil = d.facts.find((f) => f.key === "ceiling_height_m");
-  const plans = await extractPlans(jobId, job.pages, assets, d.unitTypes, useClaude, ceil ? { value: Number(ceil.value), evidence: ceil.evidence[0] } : undefined);
+  const plans = await extractPlans(jobId, job.pages, assets, d.unitTypes, useClaude, ceil ? { value: Number(ceil.value), evidence: ceil.evidence[0] } : undefined,
+    (levels) => writePreview(jobId, d, levels));
   d.levels = plans.levels;
   d.unitTypes = plans.unitTypes;
   d.northDeg = plans.northDeg;
@@ -63,8 +69,9 @@ export async function extractAll(jobId: string): Promise<PropertyDossier> {
   const focus = (job.unitFocus ?? "").toLowerCase();
   d.selectedUnitTypeId = (focus && d.unitTypes.find((u) => focus.includes(u.code.toLowerCase()))?.id) || d.unitTypes.find((u) => u.levelIds.length)?.id || d.unitTypes[0]?.id;
 
-  // C. materials
-  const mats = await extractMaterials(jobId, job.pages, assets, useClaude);
+  const matsR = await matsP;
+  if (!matsR.ok) throw matsR.error;
+  const mats = matsR.value;
   d.materials = mats.materials;
   d.facts.push(...mats.facts);
   d.warnings.push(...mats.warnings);
@@ -88,4 +95,18 @@ export async function extractAll(jobId: string): Promise<PropertyDossier> {
   const listed = saved.levels.reduce((n, l) => n + l.rooms.length, 0);
   await log(jobId, "extract", `Dossier: ${saved.facts.length} facts, ${saved.unitTypes.length} unit type(s), ${saved.levels.length} level(s), ${listed} room(s) (${placed} placed), ${saved.materials.length} material(s), ${saved.warnings.length} warning(s).`);
   return saved;
+}
+
+/**
+ * While plans are still being read, rebuild a rough 3D preview from the floors finished so far,
+ * so the person waiting can watch the model take shape. Best effort: a failure never stops extraction.
+ */
+async function writePreview(jobId: string, d: PropertyDossier, levels: PropertyDossier["levels"]) {
+  try {
+    const partial = normalizeDossier({ ...d, levels: structuredClone(levels), selectedUnitTypeId: undefined });
+    const g = reconstruct(partial);
+    await writeJobFile(jobId, "preview-scene.json", JSON.stringify({ ...g, preview: { levelsRead: levels.length, updatedAt: new Date().toISOString() } }));
+  } catch (e) {
+    await log(jobId, "extract", `Live preview skipped: ${e instanceof Error ? e.message : e}`, "warn");
+  }
 }

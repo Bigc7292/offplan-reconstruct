@@ -192,7 +192,7 @@ async function partB(page: Page) {
     const created: any = await api("/api/jobs", { method: "POST", body: fd });
     const id = created.job?.id ?? created.id;
     const t0 = Date.now();
-    const j = await waitForReview(id, 600_000);
+    const j = await waitForReview(id, Number(process.env.REVIEW_TIMEOUT_MS ?? 600_000));
     const pdfPages = j.job.pages.filter((p: any) => j.job.sources.find((s: any) => s.id === p.sourceId)?.kind === "pdf");
     const unclassified = j.job.pages.filter((p: any) => !p.labels.length);
     check("B1 PDF + URL ingested", j.job.sources.length >= 2 && pdfPages.length > 1, `${j.job.sources.map((s: any) => `${s.kind}:${s.status}`).join(", ")}; ${j.job.pages.length} pages in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
