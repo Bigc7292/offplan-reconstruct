@@ -21,6 +21,7 @@ const OPENAI = {
   key: process.env.LLM_API_KEY ?? "",
   model: process.env.LLM_MODEL ?? "",
   api: process.env.LLM_API === "responses" ? "responses" : "chat",
+  effort: process.env.LLM_REASONING_EFFORT || undefined,
 };
 
 export function extractorKind(): ExtractorKind {
@@ -140,10 +141,11 @@ async function callOpenAI<S extends z.ZodType>(opts: CallOpts<S>) {
 async function callResponses<S extends z.ZodType>(opts: CallOpts<S>) {
   const images = await Promise.all((opts.images ?? []).map(imagePng));
   const jsonSchema = z.toJSONSchema(opts.schema);
-  const body = JSON.stringify({
+  const body = (effort: string | undefined) => JSON.stringify({
     model: OPENAI.model,
     max_output_tokens: 32000,
     stream: true,
+    ...(effort ? { reasoning: { effort } } : {}),
     instructions: opts.system,
     input: [{
       role: "user",
@@ -156,12 +158,14 @@ async function callResponses<S extends z.ZodType>(opts: CallOpts<S>) {
   });
   let final: { status?: string; usage?: unknown; incomplete_details?: { reason?: string }; output?: { type: string; content?: { type: string; text?: string }[] }[] } | undefined;
   let lastErr = "";
-  for (let attempt = 1; attempt <= 3 && !final; attempt++) {
+  for (let attempt = 1; attempt <= 5 && !final; attempt++) {
+    if (attempt > 1) await new Promise((r) => setTimeout(r, Math.min(2000 * 2 ** (attempt - 2), 10_000)));
     try {
       const res = await fetch(`${OPENAI.baseUrl}/v1/responses`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${OPENAI.key}` },
-        body,
+        // the gateway gives up if the first byte takes >30 s; long-reasoning plan calls hit that, so retries reason less
+        body: body(attempt === 1 ? OPENAI.effort : "low"),
         signal: AbortSignal.timeout(600_000),
       });
       const text = await res.text();
