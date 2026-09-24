@@ -41,7 +41,7 @@ Last run 2026-09-24, headless Chromium with software WebGL: **13/13 passed.**
 
 ## Known gaps
 
-- Real brochures with the local extractor give room *names* per level but no geometry and (for Ninteen) no printed room areas; geometry needs tracing in the plan editor, or the Claude vision path.
+- Real brochures with the local extractor give room *names* per level but no geometry. Ninteen prints room sizes (e.g. "MAIN KITCHEN 5.4 X 3.8") only inside the plan images, which are embedded at about 640 px wide; OCR reads a few of them but not reliably, so they are not used. Geometry and sizes come from tracing in the plan editor, or from the Claude vision path.
 - The Claude path has no server-side fallback if a call fails mid-job; the stage errors and can be re-run from the review page.
 - The Al Barari renders PDF has no floor plan, so it yields finishes and captions only; the title deed yields registry facts only (and contains owner names: treat as sensitive).
 - Fonts load from Google Fonts; offline, the UI falls back to system fonts.
