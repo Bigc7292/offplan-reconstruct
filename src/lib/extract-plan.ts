@@ -12,6 +12,7 @@ import type { Evidence, Level, PageRecord, Room, Wall, Furniture, UnitType } fro
 import { inferredEvidence } from "./schema";
 import { LEVEL_WORDS, ROOM_WORDS } from "./classify";
 import type { AssetIndexEntry } from "./ingest";
+import { limiter, settle, MODEL_CONCURRENCY } from "./concurrency";
 import { callStructured, PLAN_SYSTEM, PlanLevelSchema, type PlanLevelOut } from "./llm";
 import { jobFile, log } from "./store";
 import { DEFAULT_CEILING_M } from "./reconstruct";
@@ -98,6 +99,7 @@ function drawingCaption(p: PageRecord, bbox: [number, number, number, number]) {
 
 export async function extractPlans(
   jobId: string, pages: PageRecord[], assets: LabelledAsset[], unitTypes: UnitType[], useClaude: boolean, ceilingFact?: { value: number; evidence: Evidence },
+  onLevel?: (levels: Level[]) => Promise<void>,
 ): Promise<{ levels: Level[]; warnings: string[]; northDeg?: number; unitTypes: UnitType[]; planAssetIds: string[] }> {
   const warnings: string[] = [];
   const levels: Level[] = [];
@@ -106,11 +108,32 @@ export async function extractPlans(
   const planPages = pages.filter((p) => p.labels.some((l) => l === "unit_plan" || l === "typical_floor" || l === "furniture_layout"));
   if (!planPages.length) warnings.push("No floor plan found. Add the unit plan page or another brochure to reconstruct geometry.");
 
-  for (const p of planPages) {
+  const planImgsFor = (p: PageRecord) => {
     const crops = assets.filter((a) => a.page === p.n && (a.kind === "unit_plan" || a.kind === "floor_plan"));
-    const planImgs: Array<{ id: string; path: string; bbox: [number, number, number, number]; w: number; h: number }> =
+    const imgs: Array<{ id: string; path: string; bbox: [number, number, number, number]; w: number; h: number }> =
       crops.length ? crops : assets.filter((a) => a.page === p.n && a.origin !== "pdf_crop").map((a) => ({ ...a, bbox: [0, 0, 1, 1] as [number, number, number, number] }));
-    if (!planImgs.length) planImgs.push({ id: `a${p.n}-page`, path: p.image, bbox: [0, 0, 1, 1], w: p.widthPx, h: p.heightPx });
+    if (!imgs.length) imgs.push({ id: `a${p.n}-page`, path: p.image, bbox: [0, 0, 1, 1], w: p.widthPx, h: p.heightPx });
+    return imgs;
+  };
+
+  // start every plan's model call up front, a few at a time; levels are then assembled in page order
+  const run = limiter(MODEL_CONCURRENCY);
+  const modelOut = new Map<string, ReturnType<typeof settle<PlanLevelOut>>>();
+  if (useClaude) {
+    for (const p of planPages) {
+      planImgsFor(p).forEach((img, i) => {
+        const levelId = `L-p${p.n}-${i + 1}`;
+        modelOut.set(levelId, settle(run(() => callStructured(jobId, {
+          task: `plan ${levelId}`, system: PLAN_SYSTEM, schema: PlanLevelSchema, schemaName: "Level",
+          prompt: `This is a plan image cut from brochure page ${p.n}. Nearby text on the page:\n"""\n${p.text.slice(0, 3000)}\n"""\nReturn the level geometry.`,
+          images: [jobFile(jobId, img.path)],
+        }))));
+      });
+    }
+  }
+
+  for (const p of planPages) {
+    const planImgs = planImgsFor(p);
     const lists = parseScheduleLists(p);
 
     // pair each plan with the nearest schedule list by horizontal distance
@@ -138,16 +161,15 @@ export async function extractPlans(
 
       if (useClaude) {
         try {
-          const out = await callStructured(jobId, {
-            task: `plan ${levelId}`, system: PLAN_SYSTEM, schema: PlanLevelSchema, schemaName: "Level",
-            prompt: `This is a plan image cut from brochure page ${p.n}. Nearby text on the page:\n"""\n${p.text.slice(0, 3000)}\n"""\nReturn the level geometry.`,
-            images: [jobFile(jobId, img.path)],
-          });
+          const r = await modelOut.get(levelId)!;
+          if (!r.ok) throw r.error;
+          const out = r.value;
           const lvl = planOutToLevel(out, { levelId, pageN: p.n, img, heightM, ceilingFact });
           if (out.northArrowDeg !== null && northDeg === undefined) northDeg = out.northArrowDeg;
           if (lvl.plan!.scaleConfidence < 0.4) warnings.push(`${lvl.name}: scale not proven (${out.scaleSource}). Calibrate from a printed dimension in the plan editor.`);
           levels.push(lvl);
           await log(jobId, "extract", `${lvl.name}: ${lvl.rooms.length} room(s), ${lvl.walls.length} wall(s) from vision model (scale confidence ${out.scaleConfidence.toFixed(2)}).`);
+          await onLevel?.(levels);
           continue;
         } catch (e) {
           warnings.push(`Page ${p.n}: vision plan extraction failed (${e instanceof Error ? e.message : e}); falling back to the room schedule + trace underlay.`);

@@ -10,6 +10,7 @@ import { DossierTable } from "@/components/DossierTable";
 import { PlanEditor2D } from "@/components/PlanEditor2D";
 import { SourcePageViewer, EvidenceDrawer, describeElement } from "@/components/Evidence";
 import { Viewer3D } from "@/components/ViewerDynamic";
+import { LivePreview } from "@/components/LivePreview";
 import { useStudio } from "@/lib/client-store";
 import { useJobPolling } from "@/lib/use-job";
 import { levelsForSelection } from "@/lib/selection";
@@ -58,6 +59,7 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
       <div className="flex-1 px-6 py-5 space-y-4">
         <PipelineStepper job={job} logs={logs} />
         <PageFilmstrip job={job} active={pageFocus?.page} onPick={(n) => focusPage({ page: n })} />
+        <LivePreview job={job} />
 
         {job.sources.filter((s) => s.status !== "ok").map((s) => (
           <div key={s.id} className="panel p-3 text-sm text-danger">Source “{s.name}” {s.status}: {s.error}</div>
