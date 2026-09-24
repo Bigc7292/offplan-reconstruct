@@ -4,7 +4,8 @@
 //
 // Providers (first match wins):
 //   LLM_PROVIDER=openai + LLM_BASE_URL + LLM_API_KEY + LLM_MODEL → any OpenAI-compatible
-//     chat-completions endpoint (e.g. a model gateway)
+//     gateway. LLM_API=chat (default) uses /v1/chat/completions, LLM_API=responses uses
+//     /v1/responses (some models, e.g. gpt-6-astra on OneProvider, only answer there).
 //   ANTHROPIC_API_KEY → Claude via the Anthropic SDK
 //   neither → the local extractor runs and no model is called.
 import Anthropic from "@anthropic-ai/sdk";
@@ -19,6 +20,7 @@ const OPENAI = {
   baseUrl: (process.env.LLM_BASE_URL ?? "").replace(/\/+$/, "").replace(/\/v1$/, ""),
   key: process.env.LLM_API_KEY ?? "",
   model: process.env.LLM_MODEL ?? "",
+  api: process.env.LLM_API === "responses" ? "responses" : "chat",
 };
 
 export function extractorKind(): ExtractorKind {
@@ -52,7 +54,8 @@ type CallOpts<S> = { task: string; system: string; prompt: string; images?: stri
 export async function callStructured<S extends z.ZodType>(jobId: string, opts: CallOpts<S>): Promise<z.infer<S>> {
   const started = Date.now();
   try {
-    const { parsed, usage, stop } = extractorKind() === "openai" ? await callOpenAI(opts) : await callClaude(opts);
+    const kind = extractorKind();
+    const { parsed, usage, stop } = kind === "openai" ? (OPENAI.api === "responses" ? await callResponses(opts) : await callOpenAI(opts)) : await callClaude(opts);
     await logModelCall(jobId, {
       task: opts.task, model: MODEL, schema: opts.schemaName, system: opts.system, prompt: opts.prompt,
       images: opts.images, usage, stop_reason: stop, ms: Date.now() - started,
@@ -127,6 +130,67 @@ async function callOpenAI<S extends z.ZodType>(opts: CallOpts<S>) {
   const parsed = opts.schema.safeParse(json);
   if (!parsed.success) throw new Error(`Model reply for ${opts.task} did not match schema ${opts.schemaName}: ${parsed.error.issues.slice(0, 3).map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`);
   return { parsed: parsed.data as z.infer<S>, usage: data.usage, stop: choice?.finish_reason };
+}
+
+/**
+ * OpenAI Responses API (/v1/responses), validated with Zod. Streams, because OneProvider drops
+ * non-streamed requests that run past ~30 s with a 502. The gateway also ignores text.format,
+ * so the JSON Schema is repeated in the prompt.
+ */
+async function callResponses<S extends z.ZodType>(opts: CallOpts<S>) {
+  const images = await Promise.all((opts.images ?? []).map(imagePng));
+  const jsonSchema = z.toJSONSchema(opts.schema);
+  const body = JSON.stringify({
+    model: OPENAI.model,
+    max_output_tokens: 32000,
+    stream: true,
+    instructions: opts.system,
+    input: [{
+      role: "user",
+      content: [
+        ...images.map((b) => ({ type: "input_image", image_url: `data:image/png;base64,${b.toString("base64")}`, detail: "high" })),
+        { type: "input_text", text: `${opts.prompt}\n\nReply with one JSON object matching this JSON Schema, and nothing else:\n${JSON.stringify(jsonSchema)}` },
+      ],
+    }],
+    text: { format: { type: "json_schema", name: opts.schemaName.replace(/[^a-zA-Z0-9_-]/g, "_"), schema: jsonSchema, strict: false } },
+  });
+  let final: { status?: string; usage?: unknown; incomplete_details?: { reason?: string }; output?: { type: string; content?: { type: string; text?: string }[] }[] } | undefined;
+  let lastErr = "";
+  for (let attempt = 1; attempt <= 3 && !final; attempt++) {
+    try {
+      const res = await fetch(`${OPENAI.baseUrl}/v1/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${OPENAI.key}` },
+        body,
+        signal: AbortSignal.timeout(600_000),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        lastErr = `Model gateway returned ${res.status} for ${opts.task}: ${text.slice(0, 300)}`;
+        if (res.status >= 500 || res.status === 429) continue;
+        throw new Error(lastErr);
+      }
+      for (const line of text.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const ev = JSON.parse(line.slice(5));
+        if (ev.type === "response.completed" || ev.type === "response.incomplete") final = ev.response;
+        else if (ev.type === "response.failed" || ev.type === "error") lastErr = `Model gateway failed ${opts.task}: ${JSON.stringify(ev.response?.error ?? ev.error ?? ev).slice(0, 300)}`;
+      }
+    } catch (e) {
+      if (String(e).includes("Model gateway returned 4")) throw e;
+      lastErr = `Model gateway call for ${opts.task} failed: ${(e as Error).cause ?? e}`;
+    }
+  }
+  if (!final) throw new Error(lastErr || `Model gateway returned no response for ${opts.task}.`);
+  if (final.status === "incomplete") throw new Error(`Model output for ${opts.task} was cut off (${final.incomplete_details?.reason ?? "incomplete"}).`);
+  const parts = (final.output ?? []).filter((o) => o.type === "message").flatMap((o) => o.content ?? []);
+  if (parts.some((c) => c.type === "refusal")) throw new Error(`Model declined the ${opts.task} request.`);
+  const raw = parts.map((c) => c.text ?? "").join("").trim().replace(/^```(?:json)?\s*|\s*```$/g, "");
+  let json: unknown;
+  try { json = JSON.parse(raw); } catch { throw new Error(`Model reply for ${opts.task} was not JSON: ${raw.slice(0, 200)}`); }
+  const parsed = opts.schema.safeParse(json);
+  if (!parsed.success) throw new Error(`Model reply for ${opts.task} did not match schema ${opts.schemaName}: ${parsed.error.issues.slice(0, 3).map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`);
+  return { parsed: parsed.data as z.infer<S>, usage: final.usage, stop: final.status };
 }
 
 // ───────────────────────── prompts & schemas used by the extract-* modules ─────────────────────────

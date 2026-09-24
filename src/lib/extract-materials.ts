@@ -9,6 +9,7 @@ import { jobFile, log } from "./store";
 import { regionColor } from "./image-stats";
 import { programFor } from "./extract-plan";
 import sharp from "sharp";
+import type * as z from "zod/v4";
 
 type LabelledAsset = AssetIndexEntry & { kind: string; caption?: string };
 
@@ -39,7 +40,24 @@ export async function extractMaterials(
     }
   }
 
-  for (const a of cgi.slice(0, useClaude ? 16 : 60)) {
+  const batch = cgi.slice(0, useClaude ? 16 : 60);
+  // vision calls are slow (tens of seconds each through a gateway), so run up to 4 at once
+  const vision = new Map<string, Promise<{ ok: true; out: z.infer<typeof CgiSchema> } | { ok: false; error: unknown }>>();
+  if (useClaude) {
+    const todo = batch.filter((a) => a.kind !== "cgi_exterior");
+    const slots: Promise<unknown>[] = [];
+    for (const a of todo) {
+      if (slots.length >= 4) await Promise.race(slots);
+      const pageCaption = a.caption ?? pages.find((p) => p.n === a.page)?.caption;
+      const job = callStructured(jobId, { task: `materials ${a.id}`, system: CGI_SYSTEM, schema: CgiSchema, schemaName: "Material[]", prompt: `Render from page ${a.page}. Caption: ${pageCaption ?? "(none)"}.`, images: [jobFile(jobId, a.path)] })
+        .then((out) => ({ ok: true as const, out }), (error) => ({ ok: false as const, error }));
+      vision.set(a.id, job);
+      const slot: Promise<unknown> = job.finally(() => slots.splice(slots.indexOf(slot), 1));
+      slots.push(slot);
+    }
+  }
+
+  for (const a of batch) {
     const page = pages.find((p) => p.n === a.page);
     const caption = a.caption ?? page?.caption;
     const program = caption ? programFor(caption.replace(/^.*?[–-]\s*/, "")) : a.kind === "cgi_exterior" ? "exterior" : "other";
@@ -50,7 +68,9 @@ export async function extractMaterials(
 
     if (useClaude) {
       try {
-        const out = await callStructured(jobId, { task: `materials ${a.id}`, system: CGI_SYSTEM, schema: CgiSchema, schemaName: "Material[]", prompt: `Render from page ${a.page}. Caption: ${caption ?? "(none)"}.`, images: [file] });
+        const r = await vision.get(a.id)!;
+        if (!r.ok) throw r.error;
+        const out = r.out;
         out.materials.forEach((m, i) => {
           const mat: Material = {
             id: `m-${a.id}-${i + 1}`, name: m.nameIsWrittenOrObvious ? m.name : `${m.name} (as seen in render)`, albedoHint: m.albedoHex, roughness: m.roughness, metalness: m.metalness,
