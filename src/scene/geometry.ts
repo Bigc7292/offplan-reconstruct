@@ -34,7 +34,11 @@ function addQuad(b: TriBuffers, pts: number[][], n: number[], uv: number[][], pi
   b.triPiece.push(piece, piece);
 }
 
-function addBox(b: TriBuffers, p: ScenePiece, pieceIdx: number) {
+/** Solid wall parts whose top face is drawn as the dark cut line of a section. */
+const CAPPED = new Set(["wall", "lintel", "sill"]);
+export const CAP_MATERIAL = "auto:cap";
+
+function addBox(b: TriBuffers, p: ScenePiece, pieceIdx: number, cap?: TriBuffers) {
   if (p.shape.type !== "box") return;
   const { center: c, size: s, rotY } = p.shape;
   const cos = Math.cos(rotY), sin = Math.sin(rotY);
@@ -51,7 +55,7 @@ function addBox(b: TriBuffers, p: ScenePiece, pieceIdx: number) {
     { n: [0, 0, 1], v: [[-hx, -hy, hz], [hx, -hy, hz], [hx, hy, hz], [-hx, hy, hz]], uv: [[0, 0], [s.x, 0], [s.x, s.y], [0, s.y]] },
     { n: [0, 0, -1], v: [[hx, -hy, -hz], [-hx, -hy, -hz], [-hx, hy, -hz], [hx, hy, -hz]], uv: [[0, 0], [s.x, 0], [s.x, s.y], [0, s.y]] },
   ];
-  for (const f of faces) addQuad(b, f.v.map((v) => tr(v[0], v[1], v[2])), rn(f.n[0], f.n[1], f.n[2]), f.uv, pieceIdx);
+  for (const f of faces) addQuad(cap && f.n[1] === 1 ? cap : b, f.v.map((v) => tr(v[0], v[1], v[2])), rn(f.n[0], f.n[1], f.n[2]), f.uv, pieceIdx);
 }
 
 /** Box with every edge chamfered by `c` (6 inset faces, 12 edge strips, 8 corner triangles). */
@@ -133,18 +137,23 @@ export function layerOf(p: ScenePiece): MeshGroup["layer"] {
 /** Merge pieces into one buffer per (level, material, layer, inferred) so a whole unit is a handful of draw calls. */
 export function buildGroups(g: PropertySceneGraph): MeshGroup[] {
   const groups = new Map<string, MeshGroup>();
-  g.pieces.forEach((p, i) => {
-    const layer = layerOf(p);
-    const key = `${p.levelId}|${p.materialId}|${layer}|${p.inferred ? 1 : 0}`;
+  const group = (levelId: string, materialId: string, layer: MeshGroup["layer"], inferred: boolean) => {
+    const key = `${levelId}|${materialId}|${layer}|${inferred ? 1 : 0}`;
     let grp = groups.get(key);
     if (!grp) {
-      grp = { key, levelId: p.levelId, materialId: p.materialId, layer, inferred: p.inferred, buffers: empty() };
+      grp = { key, levelId, materialId, layer, inferred, buffers: empty() };
       groups.set(key, grp);
     }
-    if (p.shape.type === "box") (p.shape.bevel ? addChamferBox : addBox)(grp.buffers, p, i);
+    return grp;
+  };
+  const caps = g.materials.some((m) => m.id === CAP_MATERIAL);
+  g.pieces.forEach((p, i) => {
+    const grp = group(p.levelId, p.materialId, layerOf(p), p.inferred);
+    if (p.shape.type === "box" && p.shape.bevel) addChamferBox(grp.buffers, p, i);
+    else if (p.shape.type === "box") addBox(grp.buffers, p, i, caps && CAPPED.has(p.elementKind) ? group(p.levelId, CAP_MATERIAL, "main", p.inferred).buffers : undefined);
     else addPoly(grp.buffers, p, i);
   });
-  return [...groups.values()];
+  return [...groups.values()].filter((grp) => grp.buffers.indices.length);
 }
 
 /** Triangles for a single piece (used for selection highlight overlays). */

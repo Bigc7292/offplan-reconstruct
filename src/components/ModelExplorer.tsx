@@ -10,7 +10,7 @@ import type { WalkPose } from "@/scene/WalkControls";
 import { EvidenceDrawer, describeElement } from "./Evidence";
 import { Brand } from "./Brand";
 import { fileUrl, useStudio } from "@/lib/client-store";
-import { RenderGallery, useRenders } from "./RenderGallery";
+import { RenderGallery, WalkthroughVideo, useRenders, useWalkthroughVideo } from "./RenderGallery";
 
 type Props = { jobId: string; scene: PropertySceneGraph; dossier: PropertyDossier | null; sources: SourceRecord[]; share?: boolean };
 
@@ -23,6 +23,8 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
   // buyers opening a shared link land on the rendered views first; the 3D model is one click away
   const [gallery, setGallery] = useState<boolean | null>(null);
   const showGallery = !!renders && (gallery ?? !!share);
+  const video = useWalkthroughVideo(jobId);
+  const [showVideo, setShowVideo] = useState(false);
   const [showInferred, setShowInferred] = useState(true);
   const [levelId, setLevelId] = useState<string | "all">(scene.spawn.levelId || scene.levels[0]?.id || "all");
   const [measuring, setMeasuring] = useState(false);
@@ -103,11 +105,16 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
             <div className="label mb-1.5">View</div>
             <div className="grid grid-cols-3 gap-1">
               {(["dollhouse", "walk", "plan"] as const).map((m) => (
-                <button key={m} data-testid={`mode-${m}`} onClick={() => { setMode(m); setMeasuring(false); setGallery(false); }} className={`btn !px-1 !text-xs capitalize ${mode === m && !showGallery ? "btn-gold" : ""}`}>{m}</button>
+                <button key={m} data-testid={`mode-${m}`} onClick={() => { setMode(m); setMeasuring(false); setGallery(false); setShowVideo(false); }} className={`btn !px-1 !text-xs capitalize ${mode === m && !showGallery ? "btn-gold" : ""}`}>{m}</button>
               ))}
             </div>
             {renders && (
-              <button data-testid="mode-renders" onClick={() => setGallery(true)} className={`btn w-full mt-1 !text-xs ${showGallery ? "btn-gold" : ""}`}>Rendered views ({renders.shots.length})</button>
+              <button data-testid="mode-renders" onClick={() => { setGallery(true); setShowVideo(false); }} className={`btn w-full mt-1 !text-xs ${showGallery ? "btn-gold" : ""}`}>Rendered views ({renders.shots.length})</button>
+            )}
+            {video ? (
+              <button data-testid="mode-video" onClick={() => setShowVideo(true)} className={`btn w-full mt-1 !text-xs ${showVideo ? "btn-gold" : ""}`}>▶ Walkthrough video</button>
+            ) : (
+              <Link data-testid="mode-tour" href={`/tour/${jobId}`} className="btn w-full mt-1 !text-xs">▶ Guided tour</Link>
             )}
           </div>
           {scene.levels.length > 1 && (
@@ -152,6 +159,7 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
         </aside>
 
         <section className="relative min-h-0" data-testid="viewer">
+          {showVideo && video && <WalkthroughVideo url={video} poster={fileUrl(jobId, "exports/walkthrough-poster.jpg")} onClose={() => setShowVideo(false)} />}
           {showGallery && renders && <RenderGallery jobId={jobId} index={renders} onOpenRoom={(id) => { setGallery(false); setMode("walk"); jumpTo(id); }} />}
           <Viewer3D scene={scene} jobId={jobId} mode={mode} showInferred={showInferred} levelId={mode === "walk" ? activeLevel : levelId}
             selectedId={selection?.id ?? null} pulseKey={pulse} jumpTo={jump} measuring={measuring} overlay={overlay} mood={mood} watermark

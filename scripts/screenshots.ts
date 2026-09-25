@@ -6,7 +6,8 @@
 // walk views in the main rooms, the plan view and the share page.
 import fs from "node:fs";
 import path from "node:path";
-import { chromium, type Page } from "playwright-core";
+import type { Page } from "playwright-core";
+import { launchBrowser } from "./lib/browser";
 
 const [jobId, outArg] = process.argv.slice(2);
 if (!jobId) throw new Error("Usage: npm run screenshots -- <jobId> [outDir]");
@@ -14,12 +15,6 @@ const BASE = process.env.APP_URL ?? "http://localhost:3000";
 const OUT = path.resolve(outArg ?? `data/screenshots/${jobId}`);
 fs.mkdirSync(OUT, { recursive: true });
 
-function chromePath() {
-  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
-  const root = process.env.PLAYWRIGHT_BROWSERS_PATH ?? "/opt/pw-browsers";
-  const d = fs.existsSync(root) ? fs.readdirSync(root).find((x) => /^chromium-\d+$/.test(x)) : undefined;
-  return d ? path.join(root, d, "chrome-linux", "chrome") : undefined;
-}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const shots: string[] = [];
@@ -30,7 +25,8 @@ async function shot(page: Page, name: string) {
   console.log(file);
 }
 
-const browser = await chromium.launch({ executablePath: chromePath(), args: ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
+const { browser, gpu } = await launchBrowser();
+console.log(`WebGL: ${gpu}`);
 const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 })).newPage();
 const errors: string[] = [];
 page.on("pageerror", (e) => errors.push(String(e)));

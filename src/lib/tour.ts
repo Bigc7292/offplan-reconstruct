@@ -1,0 +1,243 @@
+// Guided walkthrough of a reconstructed property: an opening exterior orbit, then each floor as a
+// cut-away followed by its main rooms at eye height, then a closing aerial. Pure function of the
+// scene graph, so any property gets the same kind of tour and the video is reproducible frame by frame.
+//
+// World space is three.js: x = plan x, y = elevation, z = -plan y.
+import type { PropertySceneGraph, SceneRoom, Vec2, Vec3 } from "./schema";
+import { roomViewpoint, pointInPolygon } from "./geom";
+
+export type CamKey = { pos: Vec3; target: Vec3 };
+export type TourShot = {
+  kind: "exterior" | "floor" | "room";
+  title: string;
+  subtitle?: string;
+  /** levels drawn during the shot */
+  levels: string[];
+  ceilings: boolean;
+  duration: number; // seconds
+  fov: number;
+  /** camera keyframes, eased from the first to the last */
+  path: CamKey[];
+  roomId?: string;
+  levelId?: string;
+};
+
+export const FADE_S = 0.4;
+
+const EXCLUDE = /circulation|corridor|lobby|stair|lift|shaft|store|storage|pump|plant|laundry|service|duct|void|wc\b|powder|toilet|closet|walk.?in|dressing|maid|driver|garbage|electrical|mep/i;
+
+function bbox(pts: Vec2[]) {
+  const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+  return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+}
+
+/** Rooms worth a shot on one level, in walking order. */
+export function tourRooms(scene: PropertySceneGraph, levelId: string, max = 5): SceneRoom[] {
+  const rooms = scene.rooms.filter((r) => r.levelId === levelId && r.polygon.length >= 3 && !r.inferred);
+  const score = (r: SceneRoom) => {
+    const b = bbox(r.polygon);
+    const minDim = Math.min(b.maxX - b.minX, b.maxY - b.minY);
+    if (minDim < 2.2 || r.computedAreaM2 < 7) return -1;
+    if (EXCLUDE.test(r.name) || r.program === "circulation" || r.program === "storage") return -1;
+    const outdoor = r.program === "balcony" || /terrace|garden|pool|deck|court/i.test(r.name);
+    if (outdoor) return r.computedAreaM2 >= 15 ? 40 + Math.min(r.computedAreaM2, 80) / 10 : -1;
+    if (r.program === "bath" && r.computedAreaM2 < 12) return -1;
+    const base: Record<string, number> = { living: 100, kitchen: 90, bedroom: 80, amenity: 70, other: 50, bath: 45 };
+    const master = /master|main|principal/i.test(r.name) ? 8 : 0;
+    return (base[r.program] ?? 40) + master + Math.min(r.computedAreaM2, 60) / 6;
+  };
+  const picked: SceneRoom[] = [];
+  let baths = 0, outdoors = 0;
+  for (const r of [...rooms].sort((a, b) => score(b) - score(a))) {
+    const s = score(r);
+    if (s < 0 || picked.length >= max) continue;
+    const outdoor = r.program === "balcony" || /terrace|garden|pool|deck|court/i.test(r.name);
+    if (r.program === "bath" && baths++ >= 1) continue;
+    if (outdoor && outdoors++ >= 1) continue;
+    picked.push(r);
+  }
+  if (picked.length < 2) return picked;
+  // walk order: start from the most important room, then always the nearest unvisited one
+  const order = [picked[0]];
+  const left = picked.slice(1);
+  while (left.length) {
+    const last = order[order.length - 1].centroid;
+    left.sort((a, b) => Math.hypot(a.centroid.x - last.x, a.centroid.z - last.z) - Math.hypot(b.centroid.x - last.x, b.centroid.z - last.z));
+    order.push(left.shift()!);
+  }
+  return order;
+}
+
+const v3 = (x: number, y: number, z: number): Vec3 => ({ x, y, z });
+
+/**
+ * Eye-level camera for a room: stand where the room's furniture (the bed, the sofa group, the table) is seen
+ * whole, i.e. the free spot farthest from it, and look at it. Rooms without furniture fall back to looking
+ * down their length.
+ */
+export function roomCamera(scene: PropertySceneGraph, r: SceneRoom): { x: number; y: number; lookX: number; lookY: number; lookH: number } {
+  const inRoom = (p: Vec2) => pointInPolygon(p, r.polygon);
+  const b0 = bbox(r.polygon);
+  const grid = (inset: number) => {
+    const out: Vec2[] = [];
+    for (const fx of [0, 0.25, 0.5, 0.75, 1]) for (const fy of [0, 0.25, 0.5, 0.75, 1]) {
+      out.push({ x: b0.minX + inset + (b0.maxX - b0.minX - 2 * inset) * fx, y: b0.minY + inset + (b0.maxY - b0.minY - 2 * inset) * fy });
+    }
+    return out;
+  };
+  const roomy = (p: Vec2) => [[0, 0], [0.45, 0], [-0.45, 0], [0, 0.45], [0, -0.45]].every(([dx, dy]) => inRoom({ x: p.x + dx, y: p.y + dy }));
+  // outdoor spaces (pool, terrace, garden): stand at their far side and look back at the house
+  if (r.program === "balcony" || /terrace|garden|pool|deck|court|lawn/i.test(r.name)) {
+    const indoor = scene.rooms.filter((x) => x.levelId === r.levelId && x.program !== "balcony" && !/terrace|garden|pool|deck|court|lawn/i.test(x.name));
+    if (indoor.length) {
+      const hx = indoor.reduce((a, x) => a + x.centroid.x, 0) / indoor.length;
+      const hy = -indoor.reduce((a, x) => a + x.centroid.z, 0) / indoor.length;
+      const far = grid(0.6).filter(roomy).sort((a, b) => Math.hypot(b.x - hx, b.y - hy) - Math.hypot(a.x - hx, a.y - hy))[0];
+      if (far) return { x: far.x, y: far.y, lookX: hx, lookY: hy, lookH: 1.9 };
+    }
+  }
+  // the view line must stay inside the room (no looking through a wall at furniture next door)
+  const seen = (a: Vec2, t: Vec2) => {
+    for (let k = 1; k <= 10; k++) if (!inRoom({ x: a.x + ((t.x - a.x) * k) / 11, y: a.y + ((t.y - a.y) * k) / 11 })) return false;
+    return true;
+  };
+  const furniture = scene.pieces
+    .filter((p) => p.elementKind === "furniture" && p.levelId === r.levelId && p.shape.type === "box")
+    .map((p) => {
+      const sh = p.shape as { center: Vec3; size: Vec3 };
+      return { x: sh.center.x, y: -sh.center.z, w: sh.size.x, d: sh.size.z, top: sh.center.y + sh.size.y / 2 };
+    })
+    .filter((f) => inRoom(f))
+    .filter((f) => f.w * f.d > 0.04);
+  const b = bbox(r.polygon);
+  if (furniture.length) {
+    let wx = 0, wy = 0, wt = 0;
+    for (const f of furniture) { const a = f.w * f.d; wx += f.x * a; wy += f.y * a; wt += a; }
+    const focus = { x: wx / wt, y: wy / wt };
+    const clear = (p: Vec2) =>
+      [[0, 0], [0.45, 0], [-0.45, 0], [0, 0.45], [0, -0.45]].every(([dx, dy]) => inRoom({ x: p.x + dx, y: p.y + dy })) &&
+      furniture.every((f) => Math.abs(p.x - f.x) > f.w / 2 + 0.25 || Math.abs(p.y - f.y) > f.d / 2 + 0.25);
+    const cands: Vec2[] = [];
+    for (const fx of [0, 0.25, 0.5, 0.75, 1]) for (const fy of [0, 0.25, 0.5, 0.75, 1]) {
+      cands.push({ x: b.minX + 0.6 + (b.maxX - b.minX - 1.2) * fx, y: b.minY + 0.6 + (b.maxY - b.minY - 1.2) * fy });
+    }
+    const best = cands.filter(clear).filter((p) => seen(p, focus)).map((p) => ({ p, d: Math.hypot(p.x - focus.x, p.y - focus.y) })).filter((c) => c.d > 1.6).sort((a, b2) => Math.min(b2.d, 7.5) - Math.min(a.d, 7.5))[0];
+    if (best) return { x: best.p.x, y: best.p.y, lookX: focus.x, lookY: focus.y, lookH: 0.55 };
+  }
+  const vp = roomViewpoint(r.polygon);
+  const yaw = (vp.yawDeg * Math.PI) / 180;
+  return { x: vp.x, y: vp.y, lookX: vp.x - Math.sin(yaw) * 4, lookY: vp.y + Math.cos(yaw) * 4, lookH: 1.2 };
+}
+
+export function buildTour(scene: PropertySceneGraph): TourShot[] {
+  const levels = [...scene.levels].sort((a, b) => a.elevationM - b.elevationM);
+  const above = levels.filter((l) => l.elevationM >= -0.01);
+  const shown = above.length ? above : levels;
+  const street = [...levels].sort((a, b) => Math.abs(a.elevationM) - Math.abs(b.elevationM))[0];
+  const pts = scene.rooms.filter((r) => shown.some((l) => l.id === r.levelId)).flatMap((r) => r.polygon);
+  const bb = pts.length ? bbox(pts) : { minX: scene.bounds.min.x, maxX: scene.bounds.max.x, minY: -scene.bounds.max.z, maxY: -scene.bounds.min.z };
+  const cx = (bb.minX + bb.maxX) / 2, cz = -(bb.minY + bb.maxY) / 2;
+  const size = Math.max(bb.maxX - bb.minX, bb.maxY - bb.minY, 8);
+  const top = Math.max(...shown.map((l) => l.elevationM + l.heightM));
+  const base = street?.elevationM ?? 0;
+
+  // look at the house from its main outdoor space (garden / pool side) when there is one
+  const outdoor = scene.rooms
+    .filter((r) => r.levelId === street?.id && (r.program === "balcony" || /pool|garden|terrace|deck|lawn/i.test(r.name)))
+    .sort((a, b) => b.computedAreaM2 - a.computedAreaM2)[0];
+  const a0 = outdoor ? Math.atan2(outdoor.centroid.z - cz, outdoor.centroid.x - cx) - Math.PI / 5 : (-3 * Math.PI) / 4;
+
+  const orbit = (ang: number, r: number, h: number, ty: number): CamKey => ({
+    pos: v3(cx + Math.cos(ang) * r, h, cz + Math.sin(ang) * r),
+    target: v3(cx, ty, cz),
+  });
+  const all = levels.map((l) => l.id);
+  const shots: TourShot[] = [];
+
+  const R = size * 1.2;
+  shots.push({
+    kind: "exterior", title: scene.title, subtitle: "Walkthrough of the model reconstructed from the sales brochure",
+    levels: shown.map((l) => l.id), ceilings: true, duration: 7, fov: 40,
+    path: [0, 0.5, 1].map((k) => orbit(a0 - 0.5 + k * 0.9, R * (1.08 - 0.12 * k), base + size * (0.55 - 0.15 * k), base + (top - base) * 0.35)),
+  });
+
+  // street level first, then up, then any basement
+  const order = [...levels.filter((l) => l.elevationM >= (street?.elevationM ?? 0) - 1e-6), ...levels.filter((l) => l.elevationM < (street?.elevationM ?? 0) - 1e-6).reverse()];
+  for (const lvl of order) {
+    const rooms = scene.rooms.filter((r) => r.levelId === lvl.id && r.polygon.length >= 3);
+    if (!rooms.length) continue;
+    const lb = bbox(rooms.flatMap((r) => r.polygon));
+    const lx = (lb.minX + lb.maxX) / 2, lz = -(lb.minY + lb.maxY) / 2;
+    const ls = Math.max(lb.maxX - lb.minX, lb.maxY - lb.minY, 6);
+    const stack = levels.filter((l) => l.elevationM <= lvl.elevationM + 1e-6 && (lvl.elevationM < -0.01 || l.elevationM >= -0.01 || l.id === lvl.id)).map((l) => l.id);
+    const named = rooms.filter((r) => !/unlabelled/i.test(r.name));
+    const internal = named.filter((r) => r.program !== "balcony").reduce((s, r) => s + r.areaM2, 0);
+    shots.push({
+      kind: "floor", title: lvl.name, subtitle: `${named.length} spaces${internal > 0 ? ` · about ${Math.round(internal)} m² of rooms` : ""}`,
+      levels: stack, ceilings: false, duration: 4.5, fov: 40, levelId: lvl.id,
+      path: [0, 1].map((k) => {
+        const ang = a0 + 0.15 + k * 0.45;
+        const r = ls * (0.85 - 0.08 * k);
+        return { pos: v3(lx + Math.cos(ang) * r, lvl.elevationM + ls * (0.95 - 0.1 * k), lz + Math.sin(ang) * r), target: v3(lx, lvl.elevationM, lz) };
+      }),
+    });
+    for (const r of tourRooms(scene, lvl.id)) {
+      const cam = roomCamera(scene, r);
+      const dist = Math.hypot(cam.lookX - cam.x, cam.lookY - cam.y) || 1;
+      const dir = { x: (cam.lookX - cam.x) / dist, y: (cam.lookY - cam.y) / dist }; // plan direction of the view
+      // a slow push-in of up to 0.8 m (never past the halfway point to what it looks at), with a gentle pan
+      let step = Math.min(0.8, dist * 0.35);
+      while (step > 0.1 && !pointInPolygon({ x: cam.x + dir.x * step, y: cam.y + dir.y * step }, r.polygon)) step *= 0.6;
+      const eye = r.centroid.y + 1.5;
+      const E = r.centroid.y;
+      const key = (k: number, sweep: number): CamKey => {
+        const px = cam.x + dir.x * step * k, py = cam.y + dir.y * step * k;
+        // rotate the look point about the camera by `sweep` radians
+        const lx = cam.lookX - px, ly = cam.lookY - py;
+        const c = Math.cos(sweep), sn = Math.sin(sweep);
+        return { pos: v3(px, eye, -py), target: v3(px + lx * c - ly * sn, E + cam.lookH, -(py + lx * sn + ly * c)) };
+      };
+      const size = r.documentedAreaM2 !== undefined ? `${r.documentedAreaM2.toFixed(1)} m² as printed` : `about ${r.computedAreaM2.toFixed(0)} m² traced from the plan`;
+      shots.push({
+        kind: "room", title: r.name, subtitle: `${lvl.name} · ${size}`, levels: all, ceilings: true, duration: 4, fov: 62,
+        roomId: r.id, levelId: lvl.id, path: [key(0, 0.1), key(0.5, 0), key(1, -0.1)],
+      });
+    }
+  }
+
+  shots.push({
+    kind: "exterior", title: "Reconstructed from sales materials, not a survey", subtitle: "Colours and finishes are the brochure's; furniture is illustrative",
+    levels: shown.map((l) => l.id), ceilings: true, duration: 5, fov: 40,
+    path: [0, 1].map((k) => orbit(a0 + 0.9 + k * 0.5, R * (1.05 + 0.35 * k), base + size * (0.45 + 0.35 * k), base + (top - base) * 0.3)),
+  });
+  return shots;
+}
+
+export function tourDuration(shots: TourShot[]) {
+  return shots.reduce((s, x) => s + x.duration, 0);
+}
+
+const ease = (t: number) => t * t * (3 - 2 * t);
+const lerp = (a: Vec3, b: Vec3, t: number): Vec3 => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t });
+
+/** Where the camera is at time t (seconds), which shot is on, and how dark the fade is (0..1). */
+export function tourAt(shots: TourShot[], t: number): { index: number; cam: CamKey; fade: number; local: number } {
+  let acc = 0;
+  for (let i = 0; i < shots.length; i++) {
+    const s = shots[i];
+    if (t < acc + s.duration || i === shots.length - 1) {
+      const local = Math.max(0, Math.min(s.duration, t - acc));
+      const u = ease(local / s.duration);
+      const n = s.path.length - 1;
+      const seg = Math.min(n - 1, Math.floor(u * n));
+      const k = n > 0 ? u * n - seg : 0;
+      const a = s.path[Math.max(0, seg)], b = s.path[Math.min(n, seg + 1)];
+      const cam = n > 0 ? { pos: lerp(a.pos, b.pos, k), target: lerp(a.target, b.target, k) } : s.path[0];
+      const fin = i === 0 ? 1 : Math.min(1, local / FADE_S);
+      const fout = Math.min(1, (s.duration - local) / FADE_S);
+      return { index: i, cam, fade: 1 - Math.min(fin, fout), local };
+    }
+    acc += s.duration;
+  }
+  return { index: 0, cam: shots[0].path[0], fade: 0, local: 0 };
+}

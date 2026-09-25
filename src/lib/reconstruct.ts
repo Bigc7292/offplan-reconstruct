@@ -102,10 +102,26 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
       const L = Math.hypot(w.b.x - w.a.x, w.b.y - w.a.y);
       if (L < 0.05) continue;
       const wallInferred = isInferred(w.evidence);
-      const host = hostRoomFor(w, level.rooms);
+      // each face of a solid wall takes the finish of the room it faces; a face onto the outside (no room, or
+      // a terrace / garden / pool) takes the facade finish. Different finishes → two half-thickness leaves.
+      const [leftRoom, rightRoom] = roomsBeside(w, level.rooms);
+      const faceMat = (r: Room | undefined) => w.materialId ? useMat(w.materialId, "wall", r, "auto:wall")
+        : !r || OUTDOOR_RE.test(`${r.program} ${r.name}`) ? useMat(undefined, "facade", undefined, "auto:facade")
+        : useMat(undefined, "wall", r, "auto:wall");
       const isGlass = w.kind === "glass";
       const isRail = w.kind === "railing";
-      const wallMat = isGlass || isRail ? useMat(w.materialId, "glass", undefined, "auto:glass") : useMat(w.materialId, "wall", host, "auto:wall");
+      const leftMat = isGlass || isRail ? "" : faceMat(leftRoom);
+      const rightMat = isGlass || isRail ? "" : faceMat(rightRoom);
+      const wallMat = isGlass || isRail ? useMat(w.materialId, "glass", undefined, "auto:glass") : leftMat;
+      /** a solid slice of the wall: one box, or two leaves when its faces have different finishes */
+      const solid = (s0: number, e0: number, y0: number, y1: number, kind: ElementKind, elementId: string, inferred: boolean) => {
+        if (leftMat === rightMat) {
+          push(box(w, s0, e0, y0, y1, T, { elementId, elementKind: kind, levelId: level.id, materialId: leftMat, inferred }, E));
+          return;
+        }
+        push(box(w, s0, e0, y0, y1, T / 2, { elementId, elementKind: kind, levelId: level.id, materialId: leftMat, inferred }, E, T / 4));
+        push(box(w, s0, e0, y0, y1, T / 2, { elementId, elementKind: kind, levelId: level.id, materialId: rightMat, inferred }, E, -T / 4));
+      };
       const frameMat = useMat(undefined, "joinery", undefined, "auto:frame");
       const H = w.heightM;
       const T = w.thicknessM;
@@ -146,7 +162,7 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
             push(box(w, m - 0.03, m + 0.03, 0.05, H - 0.1, 0.08, { elementId: w.id, elementKind: "frame", levelId: level.id, materialId: frameMat, inferred: wallInferred }, E));
           }
         } else {
-          push(box(w, s, e, 0, H, T, { elementId: w.id, elementKind: "wall", levelId: level.id, materialId: wallMat, inferred: wallInferred }, E));
+          solid(s, e, 0, H, "wall", w.id, wallInferred);
         }
       }
 
@@ -156,11 +172,21 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
         const sill = o.kind === "window" ? (o.sillM ?? DEFAULT_WINDOW_SILL_M) : (o.sillM ?? 0);
         if (o.kind === "window" && o.sillM === undefined) warnings.push(`Window ${o.id}: no sill height documented, using ${DEFAULT_WINDOW_SILL_M} m.`);
         const head = Math.min(H, sill + o.heightM);
-        const solidMat = isGlass || isRail ? wallMat : wallMat;
-        const lintelKind: ElementKind = isGlass ? "frame" : "lintel";
-        if (sill > 0.01 && !isRail) push(box(w, s, e, 0, sill, isGlass ? 0.08 : T, { ...base, elementKind: isGlass ? "frame" : "sill", materialId: isGlass ? frameMat : solidMat }));
-        if (head < H - 0.01 && !isRail) push(box(w, s, e, head, H, isGlass ? 0.08 : T, { ...base, elementKind: lintelKind, materialId: isGlass ? frameMat : solidMat }));
         const glassMat = useMat(undefined, "glass", undefined, "auto:glass");
+        if (isGlass) {
+          // in a glazed wall the sill and the transom above a door are glass in a slim frame, not solid panels
+          if (sill > 0.01) {
+            push(box(w, s, e, 0.05, sill, 0.03, { ...base, elementKind: "glass", materialId: glassMat }));
+            push(box(w, s, e, sill - 0.04, sill, 0.08, { ...base, elementKind: "frame", materialId: frameMat }));
+          }
+          if (head < H - 0.01) {
+            push(box(w, s, e, head, H - 0.1, 0.03, { ...base, elementKind: "glass", materialId: glassMat }));
+            push(box(w, s, e, head, head + 0.05, 0.08, { ...base, elementKind: "frame", materialId: frameMat }));
+          }
+        } else if (!isRail) {
+          if (sill > 0.01) solid(s, e, 0, sill, "sill", o.id, inf);
+          if (head < H - 0.01) solid(s, e, head, H, "lintel", o.id, inf);
+        }
         if (o.kind === "window") {
           push(box(w, s, e, sill, head, 0.03, { ...base, elementKind: "glass", materialId: glassMat }));
           push(box(w, s, e, sill, sill + 0.05, Math.max(0.08, T * 0.6), { ...base, elementKind: "frame", materialId: frameMat }));
@@ -212,6 +238,9 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
       }
     }
   }
+
+  // wall tops are drawn as a dark cut line in cut-away views (scene/geometry.ts)
+  if (pieces.some((p) => p.elementKind === "wall")) mats.set("auto:cap", FALLBACKS["auto:cap"]);
 
   // bounds
   const min: Vec3 = { x: Infinity, y: Infinity, z: Infinity };
@@ -350,14 +379,24 @@ function inPoly(pt: Vec2, poly: Vec2[]) {
   return inside;
 }
 
-/** The room a wall mostly faces (used to pick room-bound wall finishes, e.g. bathroom stone). */
-function hostRoomFor(w: Wall, rooms: Room[]): Room | undefined {
-  const mx = (w.a.x + w.b.x) / 2, my = (w.a.y + w.b.y) / 2;
+const OUTDOOR_RE = /balcony|terrace|garden|deck|pool|outdoor|lawn|court/i;
+
+/** The rooms on the wall's left (+normal) and right (-normal) sides, sampled at a few points along it. */
+function roomsBeside(w: Wall, rooms: Room[]): [Room | undefined, Room | undefined] {
   const L = Math.hypot(w.b.x - w.a.x, w.b.y - w.a.y) || 1;
-  const nx = -(w.b.y - w.a.y) / L, ny = (w.b.x - w.a.x) / L;
-  const sides = [1, -1].map((s) => rooms.find((r) => inPoly({ x: mx + nx * 0.3 * s, y: my + ny * 0.3 * s }, r.polygon)));
-  // prefer a wet room so its stone lines the shared wall
-  return sides.find((r) => r?.program === "bath") ?? sides.find(Boolean);
+  const ux = (w.b.x - w.a.x) / L, uy = (w.b.y - w.a.y) / L;
+  const nx = -uy, ny = ux;
+  const off = w.thicknessM / 2 + 0.12;
+  const side = (sg: number) => {
+    const votes = new Map<Room, number>();
+    for (const t of [0.25, 0.5, 0.75]) {
+      const pt = { x: w.a.x + ux * L * t + nx * off * sg, y: w.a.y + uy * L * t + ny * off * sg };
+      const r = rooms.find((room) => inPoly(pt, room.polygon));
+      if (r) votes.set(r, (votes.get(r) ?? 0) + 1);
+    }
+    return [...votes.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  };
+  return [side(1), side(-1)];
 }
 
 type Part = {

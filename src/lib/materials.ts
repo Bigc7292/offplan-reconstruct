@@ -46,6 +46,8 @@ const COLOR_WORDS: Record<string, string> = {
 
 export const FALLBACKS: Record<string, SceneMaterial> = {
   "auto:wall": { id: "auto:wall", name: "Wall (default — no finish documented)", color: "#e9e5de", roughness: 0.9, metalness: 0, opacity: 1, inferred: true },
+  "auto:facade": { id: "auto:facade", name: "Facade render (default — no finish documented)", color: "#ebe6de", roughness: 0.85, metalness: 0, opacity: 1, inferred: true },
+  "auto:cap": { id: "auto:cap", name: "Wall section (cut line)", color: "#3a3631", roughness: 0.9, metalness: 0, opacity: 1, inferred: true },
   "auto:floor": { id: "auto:floor", name: "Floor (default — no finish documented)", color: "#cbc3b6", roughness: 0.7, metalness: 0, opacity: 1, inferred: true },
   "auto:ceiling": { id: "auto:ceiling", name: "Ceiling (default)", color: "#f2f0eb", roughness: 0.95, metalness: 0, opacity: 1, inferred: true },
   "auto:glass": { id: "auto:glass", name: "Glazing (default)", color: "#a9c3c9", roughness: 0.05, metalness: 0.1, opacity: 0.25, inferred: true },

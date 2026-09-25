@@ -13,6 +13,7 @@
     "demo-plan": "tsx scripts/make-demo-plan.ts",
     "cc": "tsx scripts/claude-code.ts",
     "screenshots": "tsx scripts/screenshots.ts",
+    "video": "tsx scripts/video.ts",
     "llm-check": "tsx --env-file=.env.local scripts/llm-check.ts"
   },
   "dependencies": {
@@ -20,9 +21,11 @@
     "@napi-rs/canvas": "^0.1.100",
     "@react-three/drei": "^10.7.8",
     "@react-three/fiber": "^9.8.0",
+    "@react-three/postprocessing": "^3.1.2",
     "next": "15.5",
     "pdfjs-dist": "5.4",
     "playwright-core": "1.56",
+    "postprocessing": "^6.39.5",
     "react": "19.1",
     "react-dom": "19.1",
     "sharp": "^0.35.4",

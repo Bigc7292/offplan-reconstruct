@@ -68,8 +68,10 @@ function detectBlock(status: number, html: string): string | undefined {
   if (status === 401 || status === 403) return `HTTP ${status}`;
   if (status === 429) return "rate limited (HTTP 429)";
   if (status >= 400) return `HTTP ${status}`;
-  const lower = html.slice(0, 200_000).toLowerCase();
-  if (/captcha|cf-challenge|are you a robot|access denied|verify you are human/.test(lower)) return "bot protection / captcha";
+  const lower = html.slice(0, 400_000).toLowerCase();
+  // judge by what a visitor sees: site builders list "captcha" among their script modules on ordinary pages
+  const visible = lower.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<[^>]+>/g, " ").replace(/\s+/g, " ");
+  if (/cf-challenge|cf_chl_/.test(lower) || (/captcha|are you a robot|access denied|verify you are human/.test(visible) && visible.length < 3000)) return "bot protection / captcha";
   if (/<input[^>]+type=["']password["']/.test(lower) && html.length < 60_000) return "login wall";
   return undefined;
 }

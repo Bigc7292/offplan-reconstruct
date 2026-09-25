@@ -136,7 +136,10 @@ export async function ingestAll(jobId: string) {
           if (!m || (m.width ?? 0) < 320 || (m.height ?? 0) < 200) continue; // icons, avatars, trackers
           await addImage({ ...src }, got.data, img.alt || undefined, "url_image");
         }
-        for (const pdfUrl of u.pdfLinks.slice(0, 3)) {
+        // a development page can link a plan PDF per plot: fetch the ones that match the unit asked about first
+        const ranked = rankPdfLinks(u.pdfLinks, [job.unitFocus, job.notes].filter(Boolean).join(" "));
+        if (u.pdfLinks.length > 3) await log(jobId, "ingest", `${u.pdfLinks.length} linked PDFs; fetching the 3 most relevant${job.unitFocus ? ` to "${job.unitFocus}"` : ""}: ${ranked.slice(0, 3).map((x) => path.basename(new URL(x).pathname)).join(", ")}.`);
+        for (const pdfUrl of ranked.slice(0, 3)) {
           if (await isPrivateHost(pdfUrl)) continue;
           const got = await download(pdfUrl);
           if (!got || got.data.subarray(0, 5).toString() !== "%PDF-") continue;
@@ -180,4 +183,35 @@ export async function readAssetIndex(jobId: string): Promise<AssetIndexEntry[]> 
   } catch {
     return [];
   }
+}
+
+const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"];
+
+/**
+ * Order a listing's PDF links by relevance: plan / brochure documents first, and those naming the unit
+ * the user asked about ("Villa 8" → "Plot-8…", "Type 4" → "…Type-Four…") before the rest. Stable otherwise.
+ */
+export function rankPdfLinks(links: string[], hint: string): string[] {
+  const h = hint.toLowerCase();
+  const nums = [...h.matchAll(/\b(?:villa|plot|unit|no\.?|number|apt|apartment|house)\s*#?\s*(\d{1,4})\b/g)].map((m) => Number(m[1]));
+  const types = [...h.matchAll(/\btype\s*([a-z0-9]{1,6})\b/g)].map((m) => m[1]);
+  const score = (url: string) => {
+    let name = url.toLowerCase();
+    try { name = decodeURIComponent(new URL(url).pathname.split("/").pop() ?? url).toLowerCase(); } catch { /* keep raw */ }
+    const words = name.replace(/\.pdf$/, "").split(/[^a-z0-9]+/).filter(Boolean);
+    let sc = 0;
+    if (/brochure|floor|plan|layout/.test(name)) sc += 2;
+    for (const n of nums) {
+      // "plot-8", "villa_8", "p14", "plot14": a number standing alone after a label word, or glued to a short prefix
+      const i = words.findIndex((w, k) => (w === String(n) && k > 0 && /^[a-z]{1,6}$/.test(words[k - 1])) || new RegExp(`^[a-z]{1,6}0*${n}$`).test(w));
+      if (i >= 0) sc += 6;
+    }
+    for (const t of types) {
+      const alt = /^\d+$/.test(t) ? NUMBER_WORDS[Number(t)] : String(NUMBER_WORDS.indexOf(t));
+      const k = words.indexOf("type");
+      if (k >= 0 && (words[k + 1] === t || words[k + 1] === alt)) sc += 3;
+    }
+    return sc;
+  };
+  return links.map((l, i) => ({ l, i, s: score(l) })).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.l);
 }

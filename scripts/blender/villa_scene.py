@@ -149,9 +149,15 @@ def _restyle(mat):
     elif "frame" in name or "bronze" in name or "brass" in name or "steel" in name:
         bsdf.inputs["Metallic"].default_value = 0.85
         bsdf.inputs["Roughness"].default_value = 0.35
-    elif "soft furnishing" in name or "fabric" in name or "carpet" in name:
+    elif any(k in name for k in ("soft furnishing", "fabric", "carpet", "linen", "cushion", "throw")):
         bsdf.inputs["Roughness"].default_value = 1.0
         bsdf.inputs["Sheen Weight"].default_value = 0.6
+        bsdf.inputs["Sheen Roughness"].default_value = 0.4
+    elif "brushed metal" in name:
+        bsdf.inputs["Metallic"].default_value = 1.0
+        bsdf.inputs["Roughness"].default_value = 0.28
+    elif "timber legs" in name:
+        bsdf.inputs["Roughness"].default_value = 0.45
     elif "sanitary" in name or "ceramic" in name:
         bsdf.inputs["Base Color"].default_value = (0.93, 0.93, 0.92, 1)
         bsdf.inputs["Roughness"].default_value = 0.08
@@ -172,19 +178,41 @@ def _restyle(mat):
 
 
 def _sky(dusk=False):
+    """Physical sky for the light; the camera sees a clean blue gradient (a hazy Nishita horizon reads as brown)."""
     world = bpy.data.worlds.new("Sky")
     bpy.context.scene.world = world
     world.use_nodes = True
     nt = world.node_tree
     bg = nt.nodes["Background"]
+    out = next(n for n in nt.nodes if n.type == "OUTPUT_WORLD")
     sky = nt.nodes.new("ShaderNodeTexSky")
     sky.sky_type = "NISHITA"
     sky.sun_elevation = math.radians(8 if dusk else 38)
     sky.sun_rotation = math.radians(215)
-    sky.air_density = 1.2
-    sky.dust_density = 2.0
+    sky.air_density = 1.0
+    sky.dust_density = 0.3
+    sky.sun_disc = False
     nt.links.new(sky.outputs["Color"], bg.inputs["Color"])
     bg.inputs["Strength"].default_value = 0.22
+    # camera rays: vertical gradient, pale at the horizon, clear blue overhead
+    grad_bg = nt.nodes.new("ShaderNodeBackground")
+    coord = nt.nodes.new("ShaderNodeTexCoord")
+    sep = nt.nodes.new("ShaderNodeSeparateXYZ")
+    nt.links.new(coord.outputs["Generated"], sep.inputs["Vector"])
+    ramp = nt.nodes.new("ShaderNodeValToRGB")
+    ramp.color_ramp.elements[0].position = 0.0
+    ramp.color_ramp.elements[0].color = (0.93, 0.78, 0.66, 1) if dusk else (0.86, 0.9, 0.94, 1)
+    ramp.color_ramp.elements[1].position = 0.45
+    ramp.color_ramp.elements[1].color = (0.32, 0.36, 0.55, 1) if dusk else (0.36, 0.58, 0.86, 1)
+    nt.links.new(sep.outputs["Z"], ramp.inputs["Fac"])
+    nt.links.new(ramp.outputs["Color"], grad_bg.inputs["Color"])
+    grad_bg.inputs["Strength"].default_value = 0.9 if dusk else 1.0
+    lp = nt.nodes.new("ShaderNodeLightPath")
+    mix = nt.nodes.new("ShaderNodeMixShader")
+    nt.links.new(lp.outputs["Is Camera Ray"], mix.inputs["Fac"])
+    nt.links.new(bg.outputs["Background"], mix.inputs[1])
+    nt.links.new(grad_bg.outputs["Background"], mix.inputs[2])
+    nt.links.new(mix.outputs["Shader"], out.inputs["Surface"])
     sun = bpy.data.lights.new("Sun", "SUN")
     sun.energy = 1.2 if dusk else 2.4
     sun.angle = math.radians(1.2)
@@ -199,7 +227,7 @@ def _site(g):
     z = street["elevationM"] - 0.07
     b = g["bounds"]
     cx, cy = (b["min"]["x"] + b["max"]["x"]) / 2, -(b["min"]["z"] + b["max"]["z"]) / 2
-    for name, size, col, rough, dz in (("Lawn", 260, (0.16, 0.26, 0.09, 1), 1.0, -0.01),):
+    for name, size, col, rough, dz in (("Lawn", 1600, (0.16, 0.26, 0.09, 1), 1.0, -0.01),):
         if size is None:
             sx, sy = b["max"]["x"] - b["min"]["x"] + 4, b["max"]["z"] - b["min"]["z"] + 4
         else:
@@ -214,7 +242,7 @@ def _site(g):
         bsdf.inputs["Roughness"].default_value = rough
         if name == "Lawn":
             noise = nt.nodes.new("ShaderNodeTexNoise")
-            noise.inputs["Scale"].default_value = 40
+            noise.inputs["Scale"].default_value = 240
             ramp = nt.nodes.new("ShaderNodeValToRGB")
             ramp.color_ramp.elements[0].color = (0.12, 0.2, 0.07, 1)
             ramp.color_ramp.elements[1].color = (0.22, 0.33, 0.12, 1)
@@ -245,7 +273,7 @@ def setup(job_dir, dusk=False):
     sc.view_settings.view_transform = "AgX"
     sc.view_settings.look = "AgX - Medium High Contrast"
     sc.render.film_transparent = False
-    sc.view_settings.exposure = -0.35
+    sc.view_settings.exposure = -0.2
     print(f"setup ok: {len(bpy.data.objects)} objects, {len(bpy.data.materials)} materials")
 
 
@@ -286,7 +314,10 @@ def _viewpoint(poly):
 def shots(job_dir):
     g = _graph(job_dir)
     levels = sorted(g["levels"], key=lambda l: l["elevationM"])
-    out = [{"name": "exterior", "kind": "exterior", "title": "The villa from the garden"}]
+    out = [
+        {"name": "exterior", "kind": "exterior", "title": "The villa from above"},
+        {"name": "exterior-garden", "kind": "exterior", "view": "garden", "title": "The villa from the garden"},
+    ]
     for l in levels:
         out.append({"name": f"cutaway-{l['id']}", "kind": "cutaway", "level": l["id"], "title": f"{l['name']}: layout"})
     rooms = [r for r in g["rooms"] if r["program"] not in ("balcony", "circulation", "storage") and len(r["polygon"]) >= 3]
@@ -339,7 +370,28 @@ def render_shot(job_dir, i):
     if lawn:
         # a basement cut-away looks down through the ground
         lawn.hide_render = shot["kind"] == "cutaway" and elev[shot["level"]] < -0.01
-    if shot["kind"] == "exterior":
+    if shot["kind"] == "exterior" and shot.get("view") == "garden":
+        # eye level from beyond the largest ground-level outdoor space (pool, garden, terrace), facing the house
+        top = max(l["elevationM"] + l["heightM"] for l in g["levels"])
+        street = min(g["levels"], key=lambda l: abs(l["elevationM"]))
+        outs = [r for r in g["rooms"] if r["levelId"] == street["id"] and (r["program"] == "balcony" or any(k in r["name"].lower() for k in ("pool", "garden", "terrace", "deck", "lawn")))]
+        inside = [r for r in g["rooms"] if r["levelId"] == street["id"] and r not in outs]
+        hx = sum(r["centroid"]["x"] for r in inside) / max(1, len(inside)) if inside else cx
+        hy = -sum(r["centroid"]["z"] for r in inside) / max(1, len(inside)) if inside else cy
+        if outs:
+            o = max(outs, key=lambda r: r["computedAreaM2"])
+            ox, oy = o["centroid"]["x"], -o["centroid"]["z"]
+        else:
+            ox, oy = hx + size, hy - size
+        dx, dy = ox - hx, oy - hy
+        L = math.hypot(dx, dy) or 1
+        dx, dy = dx / L, dy / L
+        # step 30 degrees round so the facade is seen in perspective, not flat on
+        a = math.radians(30)
+        dx, dy = dx * math.cos(a) - dy * math.sin(a), dx * math.sin(a) + dy * math.cos(a)
+        dist = max(L + 8, size * 1.05)
+        _camera((hx + dx * dist, hy + dy * dist, street["elevationM"] + 2.2), (hx, hy, street["elevationM"] + top * 0.32), 24)
+    elif shot["kind"] == "exterior":
         top = max(l["elevationM"] + l["heightM"] for l in g["levels"])
         _camera((cx + size * 0.62, cy + size * 0.92, top + size * 0.2), (cx, cy, top * 0.35), 30)
     elif shot["kind"] == "cutaway":
@@ -354,14 +406,14 @@ def render_shot(job_dir, i):
         r = next(x for x in g["rooms"] if x["id"] == shot["room"])
         z = elev[r["levelId"]]
         x, y, (dx, dy) = _viewpoint(r["polygon"])
-        _camera((x, y, z + 1.45), (x + dx * 4, y + dy * 4, z + 1.25), 16)
+        _camera((x, y, z + 1.45), (x + dx * 4, y + dy * 4, z + 1.2), 18)
         # the ceiling cove / downlight wash the renders show, as a soft area light under the ceiling
         xs = [p["x"] for p in r["polygon"]]
         ys = [p["y"] for p in r["polygon"]]
         light = bpy.data.lights.new("RoomLight", "AREA")
         light.shape = "RECTANGLE"
         light.size, light.size_y = max(1, max(xs) - min(xs) - 0.6), max(1, max(ys) - min(ys) - 0.6)
-        light.energy = 60 * (max(xs) - min(xs)) * (max(ys) - min(ys))
+        light.energy = 14 * (max(xs) - min(xs)) * (max(ys) - min(ys))
         light.color = (1.0, 0.9, 0.78)
         lo = bpy.data.objects.new("RoomLight", light)
         lo.location = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2, z + r["ceilingHeightM"] - 0.08)

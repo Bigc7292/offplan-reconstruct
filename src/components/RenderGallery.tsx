@@ -20,6 +20,33 @@ export function useRenders(jobId: string) {
   return idx;
 }
 
+/** The walkthrough MP4 made by scripts/video.ts, when the job has one. */
+export function useWalkthroughVideo(jobId: string) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    const u = fileUrl(jobId, "exports/walkthrough.mp4");
+    fetch(u, { headers: { range: "bytes=0-0" }, cache: "no-store" })
+      .then((r) => { if (live && (r.status === 206 || r.ok)) setUrl(u); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [jobId]);
+  return url;
+}
+
+export function WalkthroughVideo({ url, poster, onClose }: { url: string; poster?: string; onClose: () => void }) {
+  return (
+    <div className="absolute inset-0 z-20 flex flex-col bg-black" data-testid="walkthrough-video">
+      <video src={url} poster={poster} controls autoPlay playsInline className="min-h-0 flex-1 w-full bg-black" />
+      <div className="flex items-center gap-2 border-t border-stone-800 p-2 text-xs">
+        <span className="text-stone-400">Walkthrough of the reconstructed model. Furniture is illustrative; colours and finishes come from the brochure.</span>
+        <a className="btn ml-auto" href={`${url}?download=1`}>Download MP4</a>
+        <button className="btn btn-gold" onClick={onClose}>Explore in 3D</button>
+      </div>
+    </div>
+  );
+}
+
 export function RenderGallery({ jobId, index, onOpenRoom }: { jobId: string; index: RenderIndex; onOpenRoom?: (roomId: string) => void }) {
   const [i, setI] = useState(0);
   const shot = index.shots[i];
