@@ -74,7 +74,9 @@ export async function extractMaterials(
         out.materials.forEach((m, i) => {
           const mat: Material = {
             id: `m-${a.id}-${i + 1}`, name: m.nameIsWrittenOrObvious ? m.name : `${m.name} (as seen in render)`, albedoHint: m.albedoHex, roughness: m.roughness, metalness: m.metalness,
-            mapsFromAssetIds: [a.id], appliedTo: m.appliedTo, programs: out.program !== "other" ? [out.program] : undefined,
+            // always bound to the render's room program: a garage or plant-room render ("other") must not
+            // set the finish of every room in the house
+            mapsFromAssetIds: [a.id], appliedTo: m.appliedTo, programs: [out.program],
             evidence: [{ source: "image", ref: a.id, quote: [out.caption ?? caption, out.lightingMood].filter(Boolean).join(" · "), bbox: m.regionBbox as [number, number, number, number], confidence: m.nameIsWrittenOrObvious ? 0.7 : 0.45 }],
           };
           addBound(byProgram, materials, mat);

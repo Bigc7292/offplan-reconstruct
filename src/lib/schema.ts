@@ -261,7 +261,7 @@ export const JobSchema = z.object({
   status: z.enum(["queued", "running", "review", "ready", "error"]),
   unitFocus: z.string().optional(),
   notes: z.string().optional(),
-  extractor: z.enum(["local", "claude", "openai"]),
+  extractor: z.enum(["local", "claude", "openai", "claude-code"]),
   extractorLabel: z.string().optional(),
   stages: z.array(StageStateSchema),
   sources: z.array(SourceRecordSchema),
@@ -272,7 +272,7 @@ export type Job = z.infer<typeof JobSchema>;
 
 // ───────────────────────── scene graph (builder output) ─────────────────────────
 
-export type BoxShape = { type: "box"; center: Vec3; size: Vec3; rotY: number };
+export type BoxShape = { type: "box"; center: Vec3; size: Vec3; rotY: number; /** chamfer on every edge, metres (soft furniture) */ bevel?: number };
 export type PolyShape = { type: "poly"; polygon: Vec2[]; y: number; thickness: number };
 export type ElementKind =
   | "wall" | "lintel" | "sill" | "glass" | "door_leaf" | "frame" | "floor" | "ceiling"

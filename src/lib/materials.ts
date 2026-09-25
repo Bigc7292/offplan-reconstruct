@@ -52,8 +52,14 @@ export const FALLBACKS: Record<string, SceneMaterial> = {
   "auto:frame": { id: "auto:frame", name: "Frame (default)", color: "#4a4a4c", roughness: 0.4, metalness: 0.8, opacity: 1, inferred: true },
   "auto:slab": { id: "auto:slab", name: "Structural slab (default)", color: "#9d9890", roughness: 0.9, metalness: 0, opacity: 1, inferred: true },
   "auto:door": { id: "auto:door", name: "Door leaf (default)", color: "#d9d2c6", roughness: 0.6, metalness: 0, opacity: 1, inferred: true },
-  "auto:fabric": { id: "auto:fabric", name: "Soft furnishing proxy", color: "#ddd6ca", roughness: 0.95, metalness: 0, opacity: 1, inferred: true },
+  "auto:fabric": { id: "auto:fabric", name: "Soft furnishing (illustrative)", color: "#cfc8bd", roughness: 0.95, metalness: 0, opacity: 1, inferred: true },
+  "auto:cushion": { id: "auto:cushion", name: "Cushion fabric (illustrative)", color: "#a89a86", roughness: 0.95, metalness: 0, opacity: 1, inferred: true },
+  "auto:linen": { id: "auto:linen", name: "Bed linen (illustrative)", color: "#f1eee8", roughness: 0.9, metalness: 0, opacity: 1, inferred: true },
+  "auto:throw": { id: "auto:throw", name: "Throw fabric (illustrative)", color: "#8c7b68", roughness: 0.95, metalness: 0, opacity: 1, inferred: true },
+  "auto:timber": { id: "auto:timber", name: "Dark timber legs (illustrative)", color: "#3d332c", roughness: 0.5, metalness: 0, opacity: 1, inferred: true },
+  "auto:metal": { id: "auto:metal", name: "Brushed metal fittings (illustrative)", color: "#b9b2a6", roughness: 0.3, metalness: 1, opacity: 1, inferred: true },
   "auto:ceramic": { id: "auto:ceramic", name: "Sanitaryware proxy", color: "#f4f3f0", roughness: 0.2, metalness: 0, opacity: 1, inferred: true },
+  "auto:water": { id: "auto:water", name: "Pool water", color: "#3fa7bf", roughness: 0.05, metalness: 0.1, opacity: 0.85, inferred: true },
   "auto:joinery": { id: "auto:joinery", name: "Joinery proxy (default)", color: "#a58a6c", roughness: 0.6, metalness: 0, opacity: 1, inferred: true },
 };
 

@@ -11,6 +11,8 @@
     "smoke": "tsx scripts/smoke.ts",
     "ingest-test": "tsx scripts/ingest-test.ts",
     "demo-plan": "tsx scripts/make-demo-plan.ts",
+    "cc": "tsx scripts/claude-code.ts",
+    "screenshots": "tsx scripts/screenshots.ts",
     "llm-check": "tsx --env-file=.env.local scripts/llm-check.ts"
   },
   "dependencies": {

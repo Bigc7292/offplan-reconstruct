@@ -10,6 +10,7 @@ import type { WalkPose } from "@/scene/WalkControls";
 import { EvidenceDrawer, describeElement } from "./Evidence";
 import { Brand } from "./Brand";
 import { fileUrl, useStudio } from "@/lib/client-store";
+import { RenderGallery, useRenders } from "./RenderGallery";
 
 type Props = { jobId: string; scene: PropertySceneGraph; dossier: PropertyDossier | null; sources: SourceRecord[]; share?: boolean };
 
@@ -18,8 +19,12 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
   const selection = useStudio((s) => s.selection);
   const pulse = useStudio((s) => s.pulse);
   const [mode, setMode] = useState<ViewMode>("dollhouse");
+  const renders = useRenders(jobId);
+  // buyers opening a shared link land on the rendered views first; the 3D model is one click away
+  const [gallery, setGallery] = useState<boolean | null>(null);
+  const showGallery = !!renders && (gallery ?? !!share);
   const [showInferred, setShowInferred] = useState(true);
-  const [levelId, setLevelId] = useState<string | "all">(scene.levels.length > 1 ? "all" : scene.levels[0]?.id ?? "all");
+  const [levelId, setLevelId] = useState<string | "all">(scene.spawn.levelId || scene.levels[0]?.id || "all");
   const [measuring, setMeasuring] = useState(false);
   const [mood, setMood] = useState<"day" | "dusk">("day");
   const [overlayOn, setOverlayOn] = useState(false);
@@ -45,7 +50,8 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
 
   const jumpTo = (roomId: string) => {
     const r = scene.rooms.find((x) => x.id === roomId);
-    if (r && levelId !== "all" && r.levelId !== levelId) setLevelId(r.levelId);
+    // walking always happens on the room's own floor; in dollhouse, follow the room unless showing every floor
+    if (r && (mode === "walk" || levelId !== "all") && r.levelId !== levelId) setLevelId(r.levelId);
     setJump((j) => ({ roomId, n: (j?.n ?? 0) + 1 }));
     setPick(null);
     select({ id: roomId, kind: "room", levelId: r?.levelId }, true);
@@ -97,24 +103,28 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
             <div className="label mb-1.5">View</div>
             <div className="grid grid-cols-3 gap-1">
               {(["dollhouse", "walk", "plan"] as const).map((m) => (
-                <button key={m} data-testid={`mode-${m}`} onClick={() => { setMode(m); setMeasuring(false); }} className={`btn !px-1 !text-xs capitalize ${mode === m ? "btn-gold" : ""}`}>{m}</button>
+                <button key={m} data-testid={`mode-${m}`} onClick={() => { setMode(m); setMeasuring(false); setGallery(false); }} className={`btn !px-1 !text-xs capitalize ${mode === m && !showGallery ? "btn-gold" : ""}`}>{m}</button>
               ))}
             </div>
+            {renders && (
+              <button data-testid="mode-renders" onClick={() => setGallery(true)} className={`btn w-full mt-1 !text-xs ${showGallery ? "btn-gold" : ""}`}>Rendered views ({renders.shots.length})</button>
+            )}
           </div>
           {scene.levels.length > 1 && (
             <div>
               <div className="label mb-1.5">Levels</div>
               <div className="flex flex-wrap gap-1">
                 {mode !== "walk" && <button className={`chip ${levelId === "all" ? "chip-gold" : ""}`} onClick={() => setLevelId("all")}>All</button>}
-                {scene.levels.map((l) => <button key={l.id} className={`chip ${levelId === l.id ? "chip-gold" : ""}`} onClick={() => setLevelId(l.id)}>{l.name}</button>)}
+                {scene.levels.map((l) => <button key={l.id} data-testid="level-chip" className={`chip ${levelId === l.id ? "chip-gold" : ""}`} onClick={() => setLevelId(l.id)}>{l.name}</button>)}
               </div>
             </div>
           )}
           <div>
             <div className="label mb-1.5">Rooms</div>
             <ul className="space-y-0.5" data-testid="room-list">
-              {rooms.map((r) => (
+              {rooms.map((r, i) => (
                 <li key={r.id}>
+                  {levelId === "all" && r.levelId !== rooms[i - 1]?.levelId && <div className="label mt-2 mb-0.5 px-2 text-stone-500">{scene.levels.find((l) => l.id === r.levelId)?.name}</div>}
                   <button onClick={() => jumpTo(r.id)} data-room={r.name}
                     className={`w-full flex justify-between rounded px-2 py-1 text-left text-xs ${selection?.id === r.id ? "bg-champagne-400/15 text-champagne-300" : pose?.roomId === r.id ? "bg-stone-800 text-stone-100" : "text-stone-300 hover:bg-stone-800/60"} ${r.inferred ? "border border-dashed border-inferred/50" : ""}`}>
                     <span className="truncate">{r.name}</span><span className="text-stone-500">{r.areaM2.toFixed(1)}</span>
@@ -142,6 +152,7 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
         </aside>
 
         <section className="relative min-h-0" data-testid="viewer">
+          {showGallery && renders && <RenderGallery jobId={jobId} index={renders} onOpenRoom={(id) => { setGallery(false); setMode("walk"); jumpTo(id); }} />}
           <Viewer3D scene={scene} jobId={jobId} mode={mode} showInferred={showInferred} levelId={mode === "walk" ? activeLevel : levelId}
             selectedId={selection?.id ?? null} pulseKey={pulse} jumpTo={jump} measuring={measuring} overlay={overlay} mood={mood} watermark
             canvasRef={canvas} onAzimuth={setAzimuth} onPose={setPose} onLockChange={setLocked}

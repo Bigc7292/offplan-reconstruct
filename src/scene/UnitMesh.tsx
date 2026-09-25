@@ -5,6 +5,7 @@ import * as THREE from "three";
 import type { ThreeEvent } from "@react-three/fiber";
 import type { PropertySceneGraph, ScenePiece } from "@/lib/schema";
 import { buildGroups, type MeshGroup } from "./geometry";
+import { detailTexture, patternFor } from "./textures";
 
 export type PickInfo = { piece: ScenePiece; pieceIndex: number; point: THREE.Vector3 };
 
@@ -22,6 +23,9 @@ export function useSceneMaterials(scene: PropertySceneGraph, jobId: string) {
   return useMemo(() => {
     const loader = new THREE.TextureLoader();
     const map = new Map<string, { base: THREE.MeshStandardMaterial; inferred: THREE.MeshStandardMaterial }>();
+    // which surface each material is used on decides its detail pattern (stone floor vs stone wall)
+    const usedOn = new Map<string, Set<string>>();
+    for (const p of scene.pieces) usedOn.set(p.materialId, (usedOn.get(p.materialId) ?? new Set()).add(p.elementKind));
     for (const m of scene.materials) {
       const glass = m.opacity < 1;
       const base = new THREE.MeshStandardMaterial({
@@ -34,6 +38,9 @@ export function useSceneMaterials(scene: PropertySceneGraph, jobId: string) {
         side: glass ? THREE.DoubleSide : THREE.FrontSide,
         envMapIntensity: glass ? 1.4 : 0.9,
       });
+      const kinds = usedOn.get(m.id) ?? new Set<string>();
+      const pattern = patternFor(m.name, kinds.has("floor") ? "floor" : kinds.has("wall") ? "wall" : "other");
+      if (pattern && !m.textureAssetPath) base.map = detailTexture(pattern);
       if (m.textureAssetPath) {
         const url = m.textureAssetPath.startsWith("/") ? m.textureAssetPath : `/api/jobs/${jobId}/files/${m.textureAssetPath}`;
         const tex = loader.load(url);

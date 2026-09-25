@@ -55,16 +55,24 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
     const E = level.elevationM;
     const roomById = new Map(level.rooms.map((r) => [r.id, r]));
 
+    // wall ends: corners close without two walls overlapping (see wallEndExtensions)
+    const wallExt = wallEndExtensions(level.walls);
+
     // ── rooms: floor finish, structural slab, ceiling ──
-    for (const r of level.rooms) {
+    level.rooms.forEach((r, ri) => {
       if (r.polygon.length < 3) {
         warnings.push(`Room "${r.name}" has fewer than 3 points and was skipped.`);
-        continue;
+        return;
       }
+      // sub-millimetre step per room: where traced outlines overlap, their faces are never coplanar
+      // (coplanar overlapping faces flicker in WebGL and render black in path tracers)
+      const lift = (ri % 5) * 0.0006;
       const inferred = isInferred(r.evidence);
       const balcony = /balcony|terrace|garden|deck|pool|outdoor/i.test(r.program + " " + r.name);
-      const floorY = balcony ? E - 0.05 : E;
-      const floorMat = useMat(undefined, "floor", r, "auto:floor");
+      const pool = /\bpool\b/i.test(r.name) && !/pump/i.test(r.name);
+      // pools read as water, a hair above the deck so the surface never hides under the ground
+      const floorY = (pool ? E - 0.03 : balcony ? E - 0.05 : E) + lift;
+      const floorMat = pool ? useMat("__none__", "floor", r, "auto:water") : useMat(undefined, "floor", r, "auto:floor");
       push({ elementId: r.id, elementKind: "floor", levelId: level.id, materialId: floorMat, inferred, shape: { type: "poly", polygon: r.polygon, y: floorY - 0.02, thickness: 0.02 } });
       const slabT = balcony ? 0.18 : 0.25;
       push({ elementId: r.id, elementKind: "slab", levelId: level.id, materialId: useMat(undefined, "facade", undefined, "auto:slab"), inferred: true, shape: { type: "poly", polygon: r.polygon, y: floorY - 0.02 - slabT, thickness: slabT } });
@@ -72,7 +80,7 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
       const ceilingInferred = r.ceilingHeightM === undefined;
       const ceilingH = r.ceilingHeightM ?? level.heightM ?? DEFAULT_CEILING_M;
       if (!balcony) {
-        push({ elementId: r.id, elementKind: "ceiling", levelId: level.id, materialId: useMat(undefined, "ceiling", r, "auto:ceiling"), inferred: inferred || ceilingInferred, shape: { type: "poly", polygon: r.polygon, y: E + ceilingH, thickness: 0.05 } });
+        push({ elementId: r.id, elementKind: "ceiling", levelId: level.id, materialId: useMat(undefined, "ceiling", r, "auto:ceiling"), inferred: inferred || ceilingInferred, shape: { type: "poly", polygon: r.polygon, y: E + ceilingH - lift, thickness: 0.05 } });
       }
       const c = polygonCentroid(r.polygon);
       const lp = labelPoint(r.polygon);
@@ -87,7 +95,7 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
       if (r.areaM2 !== undefined && Math.abs(r.areaM2 - computed) / Math.max(r.areaM2, 1) > 0.12) {
         warnings.push(`${r.name}: documented ${r.areaM2} m² vs traced polygon ${computed} m² (${Math.round(((computed - r.areaM2) / r.areaM2) * 100)}%).`);
       }
-    }
+    });
 
     // ── walls & openings ──
     for (const w of level.walls) {
@@ -101,7 +109,7 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
       const frameMat = useMat(undefined, "joinery", undefined, "auto:frame");
       const H = w.heightM;
       const T = w.thicknessM;
-      const endExt = isGlass || isRail ? 0 : T / 2;
+      const [extA, extB] = isGlass || isRail ? [0, 0] : wallExt.get(w.id) ?? [T / 2, T / 2];
 
       const ops = [...w.openings]
         .map((o) => {
@@ -122,8 +130,9 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
       if (cursor < L - 1e-3) solids.push([cursor, L]);
 
       for (const [s0, e0] of solids) {
-        const s = s0 === 0 ? -endExt : s0;
-        const e = e0 === L ? L + endExt : e0;
+        const s = s0 === 0 ? -extA : s0;
+        const e = e0 === L ? L + extB : e0;
+        if (e - s < 0.01) continue;
         if (isRail) {
           push(box(w, s, e, 0, H - 0.05, T * 0.3, { elementId: w.id, elementKind: "railing", levelId: level.id, materialId: wallMat, inferred: wallInferred }, E));
           push(box(w, s, e, H - 0.05, H, 0.06, { elementId: w.id, elementKind: "handrail", levelId: level.id, materialId: frameMat, inferred: wallInferred }, E));
@@ -185,17 +194,19 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
     for (const f of level.furniture ?? []) {
       const room = f.roomId ? roomById.get(f.roomId) : undefined;
       for (const part of furnitureParts(f)) {
+        if (part.w <= 0.005 || part.d <= 0.005 || part.y1 - part.y0 <= 0.005) continue;
         const matId = part.mat === "joinery" ? useMat(undefined, "joinery", room, "auto:joinery")
           : part.mat === "counter" ? useMat(undefined, "counter", room, "auto:ceramic")
           : part.mat === "ceramic" ? useMat(undefined, "counter", undefined, "auto:ceramic")
-          : useMat("__none__", "joinery", undefined, "auto:fabric");
+          : useMat("__none__", "joinery", undefined, FURNISHING_MAT[part.mat]);
         push({
           elementId: f.id, elementKind: "furniture", levelId: level.id, materialId: matId, inferred: isInferred(f.evidence),
           shape: {
             type: "box",
             center: rot3(f, part.dx, part.dy, E + part.y0 + (part.y1 - part.y0) / 2),
-            size: { x: part.w, y: part.y1 - part.y0, z: part.d },
-            rotY: (f.rotationDeg * Math.PI) / 180,
+            size: { x: round(part.w), y: round(part.y1 - part.y0), z: round(part.d) },
+            rotY: round((f.rotationDeg * Math.PI) / 180 + (part.rot ?? 0), 5),
+            ...(part.bevel ? { bevel: part.bevel } : {}),
           },
         });
       }
@@ -221,7 +232,12 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
   if (!isFinite(min.x)) { min.x = min.y = min.z = 0; max.x = max.y = max.z = 1; }
 
   // spawn in the entrance if there is one, else the largest living space
+  // start on the level at street level (elevation closest to 0), not in a basement lobby
+  const streetLevel = [...levels].sort((a, b) => Math.abs(a.elevationM) - Math.abs(b.elevationM))[0]?.id;
+  const onStreet = rooms.filter((r) => r.levelId === streetLevel && r.program !== "balcony");
   const spawnRoom =
+    [...onStreet].filter((r) => r.program === "living").sort((a, b) => b.computedAreaM2 - a.computedAreaM2)[0] ??
+    onStreet.find((r) => /entr|foyer|lobby|double height/i.test(r.name)) ??
     rooms.find((r) => /entr|foyer|lobby/i.test(r.name)) ??
     [...rooms].filter((r) => r.program === "living").sort((a, b) => b.computedAreaM2 - a.computedAreaM2)[0] ??
     rooms[0];
@@ -344,43 +360,231 @@ function hostRoomFor(w: Wall, rooms: Room[]): Room | undefined {
   return sides.find((r) => r?.program === "bath") ?? sides.find(Boolean);
 }
 
-type Part = { dx: number; dy: number; w: number; d: number; y0: number; y1: number; mat: "fabric" | "joinery" | "counter" | "ceramic" };
+type Part = {
+  dx: number; dy: number; w: number; d: number; y0: number; y1: number;
+  mat: "fabric" | "cushion" | "linen" | "throw" | "timber" | "metal" | "joinery" | "counter" | "ceramic";
+  bevel?: number; rot?: number;
+};
+/** Illustrative soft furnishings: shapes and colours are generic, only position and size come from the plan. */
+const FURNISHING_MAT: Record<string, string> = {
+  fabric: "auto:fabric", cushion: "auto:cushion", linen: "auto:linen", throw: "auto:throw", timber: "auto:timber", metal: "auto:metal",
+};
+
+/**
+ * Furniture drawn on the plan → simple, recognisable pieces (bed with pillows, sofa with cushions, table with
+ * chairs, cabinet fronts). The footprint (w × d, centre, rotation) is the plan's; everything inside it is generic.
+ * Local frame: +dy is the piece's back (headboard, sofa back) and sits at the top of the plan when rotation is 0.
+ */
 function furnitureParts(f: Furniture): Part[] {
   const { w, d, h } = f.sizeM;
+  const P: Part[] = [];
+  const add = (p: Part) => P.push(p);
   switch (f.kind) {
     case "bed_double":
-    case "bed_single":
-      return [
-        { dx: 0, dy: 0, w, d, y0: 0, y1: h, mat: "fabric" },
-        { dx: 0, dy: d / 2 - 0.05, w, d: 0.1, y0: 0, y1: 1.1, mat: "joinery" }, // headboard on the far (+y) side
-      ];
+    case "bed_single": {
+      const single = f.kind === "bed_single" || w < 1.3;
+      // plans often draw the bedside tables inside the bed's footprint: keep the mattress to a real bed width
+      const bw = Math.min(w, single ? 1.1 : 2.0);
+      const side = (w - bw) / 2;
+      const bd = Math.min(d, 2.2);
+      const y = d / 2 - bd / 2; // push the bed against the head wall
+      add({ dx: 0, dy: y + bd / 2 - 0.05, w: bw + 0.12, d: 0.1, y0: 0.05, y1: 1.15, mat: "fabric", bevel: 0.03 }); // upholstered headboard
+      add({ dx: 0, dy: y - 0.05, w: bw, d: bd - 0.1, y0: 0.08, y1: 0.3, mat: "fabric", bevel: 0.02 }); // base
+      add({ dx: 0, dy: y - 0.05, w: bw - 0.08, d: bd - 0.18, y0: 0.08, y1: 0.02 + 0.08, mat: "timber" }); // shadow gap plinth
+      add({ dx: 0, dy: y - 0.07, w: bw - 0.04, d: bd - 0.16, y0: 0.3, y1: 0.52, mat: "linen", bevel: 0.05 }); // mattress + sheet
+      add({ dx: 0, dy: y - bd / 2 + (bd * 0.62) / 2 + 0.02, w: bw + 0.02, d: bd * 0.62, y0: 0.5, y1: 0.57, mat: "linen", bevel: 0.035 }); // duvet
+      add({ dx: 0, dy: y - bd / 2 + 0.3, w: bw + 0.04, d: 0.42, y0: 0.55, y1: 0.59, mat: "throw", bevel: 0.02 }); // throw at the foot
+      const n = single ? 1 : 2;
+      const pw = (bw - 0.16) / n - 0.04;
+      for (let i = 0; i < n; i++) {
+        const px = -bw / 2 + 0.1 + pw / 2 + i * (pw + 0.06);
+        add({ dx: px, dy: y + bd / 2 - 0.34, w: pw, d: 0.36, y0: 0.52, y1: 0.68, mat: "linen", bevel: 0.07 });
+        add({ dx: px, dy: y + bd / 2 - 0.52, w: pw * 0.85, d: 0.12, y0: 0.52, y1: 0.78, mat: "cushion", bevel: 0.05, rot: 0 }); // cushion
+      }
+      if (side >= 0.35 && !single) {
+        for (const sx of [-1, 1]) {
+          const cx = sx * (bw / 2 + side / 2);
+          add({ dx: cx, dy: y + bd / 2 - 0.3, w: Math.min(0.5, side - 0.05), d: 0.42, y0: 0.0, y1: 0.5, mat: "joinery", bevel: 0.01 });
+          add({ dx: cx, dy: y + bd / 2 - 0.3, w: 0.16, d: 0.16, y0: 0.5, y1: 0.8, mat: "linen", bevel: 0.03 }); // lamp
+        }
+      }
+      return P;
+    }
     case "sofa":
-    case "armchair":
-      return [
-        { dx: 0, dy: 0, w, d, y0: 0, y1: 0.42, mat: "fabric" },
-        { dx: 0, dy: d / 2 - 0.1, w, d: 0.2, y0: 0.42, y1: h, mat: "fabric" },
-      ];
-    case "dining":
+    case "armchair": {
+      const arm = Math.min(0.2, w * 0.18);
+      const back = Math.min(0.22, d * 0.3);
+      const sh = 0.42, top = Math.max(0.72, Math.min(h, 0.85));
+      for (const [lx, ly] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) add({ dx: lx * (w / 2 - 0.06), dy: ly * (d / 2 - 0.06), w: 0.04, d: 0.04, y0: 0, y1: 0.08, mat: "timber" });
+      add({ dx: 0, dy: 0, w, d, y0: 0.08, y1: 0.3, mat: "fabric", bevel: 0.03 }); // frame
+      add({ dx: 0, dy: d / 2 - back / 2, w, d: back, y0: 0.3, y1: top, mat: "fabric", bevel: 0.05 }); // back
+      for (const sx of [-1, 1]) add({ dx: sx * (w / 2 - arm / 2), dy: -back / 2 + 0.0, w: arm, d: d - back, y0: 0.3, y1: 0.6, mat: "fabric", bevel: 0.05 });
+      const seatW = w - 2 * arm;
+      const n = Math.max(1, Math.round(seatW / 0.9));
+      const cw = seatW / n;
+      for (let i = 0; i < n; i++) {
+        const cx = -seatW / 2 + cw * (i + 0.5);
+        add({ dx: cx, dy: -back / 2, w: cw - 0.02, d: d - back - 0.02, y0: 0.3, y1: sh + 0.06, mat: "fabric", bevel: 0.06 }); // seat cushion
+        add({ dx: cx, dy: d / 2 - back - 0.08, w: cw - 0.04, d: 0.16, y0: sh + 0.04, y1: top - 0.04, mat: "fabric", bevel: 0.07 }); // back cushion
+      }
+      if (f.kind === "sofa" && seatW > 1.2) {
+        add({ dx: -seatW / 2 + 0.3, dy: d / 2 - back - 0.2, w: 0.42, d: 0.12, y0: sh + 0.06, y1: sh + 0.44, mat: "cushion", bevel: 0.06 });
+        add({ dx: seatW / 2 - 0.3, dy: d / 2 - back - 0.2, w: 0.42, d: 0.12, y0: sh + 0.06, y1: sh + 0.44, mat: "cushion", bevel: 0.06 });
+      }
+      return P;
+    }
+    case "dining": {
+      // the plan draws the table; chairs are placed along its long sides (generic)
+      const long = Math.max(w, d), short = Math.min(w, d);
+      const alongX = w >= d;
+      const th = 0.75;
+      add({ dx: 0, dy: 0, w, d, y0: th - 0.04, y1: th, mat: "joinery", bevel: 0.008 });
+      for (const [lx, ly] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) add({ dx: lx * (w / 2 - 0.1), dy: ly * (d / 2 - 0.1), w: 0.06, d: 0.06, y0: 0, y1: th - 0.04, mat: "timber" });
+      if (short >= 0.7 && long >= 0.9) {
+        const n = Math.max(1, Math.floor((long - 0.1) / 0.62));
+        const pitch = long / n;
+        for (let i = 0; i < n; i++) {
+          const t = -long / 2 + pitch * (i + 0.5);
+          for (const sd of [-1, 1]) {
+            const off = short / 2 + 0.12;
+            const [cx, cy] = alongX ? [t, sd * off] : [sd * off, t];
+            const rot = alongX ? (sd > 0 ? 0 : Math.PI) : (sd > 0 ? -Math.PI / 2 : Math.PI / 2);
+            P.push(...chair(cx, cy, rot));
+          }
+        }
+        if (long / short > 1.6) {
+          for (const sd of [-1, 1]) {
+            const off = long / 2 + 0.14;
+            const [cx, cy] = alongX ? [sd * off, 0] : [0, sd * off];
+            const rot = alongX ? (sd > 0 ? -Math.PI / 2 : Math.PI / 2) : (sd > 0 ? 0 : Math.PI);
+            P.push(...chair(cx, cy, rot));
+          }
+        }
+      }
+      return P;
+    }
     case "desk":
-      return [
-        { dx: 0, dy: 0, w, d, y0: h - 0.04, y1: h, mat: "joinery" },
-        { dx: 0, dy: 0, w: Math.min(0.12, w), d: Math.min(0.12, d), y0: 0, y1: h - 0.04, mat: "joinery" },
-      ];
+      add({ dx: 0, dy: 0, w, d, y0: h - 0.04, y1: h, mat: "joinery", bevel: 0.006 });
+      for (const sx of [-1, 1]) add({ dx: sx * (w / 2 - 0.02), dy: 0, w: 0.04, d: d - 0.02, y0: 0, y1: h - 0.04, mat: "joinery" });
+      return P;
     case "kitchen_run":
-    case "island":
-      return [
-        { dx: 0, dy: 0, w, d, y0: 0.1, y1: h - 0.04, mat: "joinery" },
-        { dx: 0, dy: 0, w: w + 0.02, d: d + 0.02, y0: h - 0.04, y1: h, mat: "counter" },
-      ];
-    case "wardrobe":
-      return [{ dx: 0, dy: 0, w, d, y0: 0, y1: h, mat: "joinery" }];
-    case "bath":
-    case "wc":
-    case "vanity":
-      return [{ dx: 0, dy: 0, w, d, y0: 0, y1: h, mat: "ceramic" }];
+    case "island": {
+      const ch = Math.max(0.86, Math.min(h, 0.95));
+      add({ dx: 0, dy: 0.03, w: w - 0.02, d: d - 0.08, y0: 0, y1: 0.1, mat: "timber" }); // recessed plinth
+      add({ dx: 0, dy: 0.01, w, d: d - 0.03, y0: 0.1, y1: ch - 0.04, mat: "joinery" }); // carcass
+      const n = Math.max(1, Math.round(w / 0.6));
+      const fw = w / n;
+      for (let i = 0; i < n; i++) {
+        // door fronts proud of the carcass with a 3 mm shadow gap between them (both faces of an island)
+        for (const sd of f.kind === "island" ? [-1, 1] : [-1]) {
+          add({ dx: -w / 2 + fw * (i + 0.5), dy: sd * (d / 2 - 0.01), w: fw - 0.004, d: 0.02, y0: 0.11, y1: ch - 0.05, mat: "joinery", bevel: 0.002 });
+          add({ dx: -w / 2 + fw * (i + 0.5), dy: sd * (d / 2 + 0.005), w: Math.min(0.3, fw * 0.5), d: 0.01, y0: ch - 0.12, y1: ch - 0.1, mat: "metal" }); // handle rail
+        }
+      }
+      add({ dx: 0, dy: 0, w: w + 0.02, d: d + 0.02, y0: ch - 0.04, y1: ch, mat: "counter", bevel: 0.004 });
+      return P;
+    }
+    case "wardrobe": {
+      const wh = Math.max(2.2, Math.min(h, 2.6));
+      add({ dx: 0, dy: 0.01, w, d: d - 0.02, y0: 0, y1: wh, mat: "joinery" });
+      const n = Math.max(1, Math.round(w / 0.55));
+      const fw = w / n;
+      for (let i = 0; i < n; i++) {
+        add({ dx: -w / 2 + fw * (i + 0.5), dy: -d / 2 + 0.005, w: fw - 0.004, d: 0.02, y0: 0.02, y1: wh - 0.02, mat: "joinery", bevel: 0.002 });
+        const hx = -w / 2 + fw * (i + 0.5) + (i % 2 ? -1 : 1) * (fw / 2 - 0.06);
+        add({ dx: hx, dy: -d / 2 - 0.01, w: 0.015, d: 0.015, y0: 0.9, y1: 1.4, mat: "metal" });
+      }
+      return P;
+    }
+    case "bath": {
+      const bh = 0.55, rim = 0.08;
+      add({ dx: 0, dy: 0, w, d, y0: 0, y1: 0.1, mat: "ceramic", bevel: 0.01 });
+      add({ dx: 0, dy: -d / 2 + rim / 2, w, d: rim, y0: 0.1, y1: bh, mat: "ceramic", bevel: 0.02 });
+      add({ dx: 0, dy: d / 2 - rim / 2, w, d: rim, y0: 0.1, y1: bh, mat: "ceramic", bevel: 0.02 });
+      add({ dx: -w / 2 + rim / 2, dy: 0, w: rim, d: d - 2 * rim, y0: 0.1, y1: bh, mat: "ceramic", bevel: 0.02 });
+      add({ dx: w / 2 - rim / 2, dy: 0, w: rim, d: d - 2 * rim, y0: 0.1, y1: bh, mat: "ceramic", bevel: 0.02 });
+      add({ dx: w / 2 - rim - 0.05, dy: 0, w: 0.04, d: 0.04, y0: bh, y1: bh + 0.18, mat: "metal" }); // filler
+      return P;
+    }
+    case "wc": {
+      const cw = Math.min(w, 0.4), cd = Math.min(d, 0.58);
+      add({ dx: 0, dy: d / 2 - 0.09, w: cw, d: 0.16, y0: 0.35, y1: 0.8, mat: "ceramic", bevel: 0.02 }); // cistern
+      add({ dx: 0, dy: d / 2 - cd / 2 - 0.05, w: cw * 0.9, d: cd - 0.12, y0: 0.0, y1: 0.4, mat: "ceramic", bevel: 0.06 }); // bowl
+      return P;
+    }
+    case "vanity": {
+      add({ dx: 0, dy: 0.02, w, d: d - 0.04, y0: 0.3, y1: 0.8, mat: "joinery", bevel: 0.004 }); // floating unit
+      add({ dx: 0, dy: 0, w: w + 0.01, d, y0: 0.8, y1: 0.84, mat: "counter", bevel: 0.004 });
+      const n = w >= 1.3 ? 2 : 1;
+      for (let i = 0; i < n; i++) {
+        const cx = n === 1 ? 0 : (i === 0 ? -w / 4 : w / 4);
+        add({ dx: cx, dy: -0.03, w: Math.min(0.5, w / n - 0.1), d: Math.min(0.36, d - 0.1), y0: 0.84, y1: 0.97, mat: "ceramic", bevel: 0.04 }); // basin
+        add({ dx: cx, dy: d / 2 - 0.06, w: 0.03, d: 0.12, y0: 0.84, y1: 1.08, mat: "metal" }); // tap
+      }
+      return P;
+    }
     default:
-      return [{ dx: 0, dy: 0, w, d, y0: 0, y1: h, mat: "joinery" }];
+      add({ dx: 0, dy: 0, w, d, y0: 0, y1: h, mat: "joinery", bevel: 0.005 });
+      return P;
   }
+}
+
+/** A dining chair facing the table: rot 0 = the chair sits on +dy of its spot and faces -dy. */
+function chair(cx: number, cy: number, rot: number): Part[] {
+  const c = Math.cos(rot), s = Math.sin(rot);
+  const at = (x: number, y: number) => ({ dx: cx + x * c - y * s, dy: cy + x * s + y * c });
+  return [
+    { ...at(0, 0), w: 0.46, d: 0.46, y0: 0.42, y1: 0.48, mat: "fabric", bevel: 0.02, rot },
+    { ...at(0, 0.2), w: 0.44, d: 0.05, y0: 0.48, y1: 0.88, mat: "fabric", bevel: 0.02, rot },
+    ...[[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([lx, ly]) => ({ ...at(lx * 0.19, ly * 0.19), w: 0.03, d: 0.03, y0: 0, y1: 0.42, mat: "timber" as const, rot })),
+  ];
+}
+
+/**
+ * How far each end of each solid wall runs past its endpoint, so corners and tees close without two walls
+ * overlapping (overlapping coplanar faces flicker in WebGL and render as black patches in path tracers).
+ * Where wall ends meet, the through wall (one with a straight continuation, else the longest) runs through and
+ * the others stop at its face; an end landing on the middle of a wall stops at that wall's face; a free end
+ * stops at its point.
+ */
+function wallEndExtensions(walls: Wall[]): Map<string, [number, number]> {
+  const TOL = 0.06;
+  const len = (w: Wall) => Math.hypot(w.b.x - w.a.x, w.b.y - w.a.y);
+  const solid = walls.filter((w) => w.kind !== "glass" && w.kind !== "railing" && len(w) >= 0.05);
+  const d2 = (p: Vec2, q: Vec2) => Math.hypot(p.x - q.x, p.y - q.y);
+  const dir = (w: Wall, from: Vec2) => {
+    const other = d2(w.a, from) < d2(w.b, from) ? w.b : w.a;
+    const L = len(w);
+    return { x: (other.x - from.x) / L, y: (other.y - from.y) / L };
+  };
+  const out = new Map<string, [number, number]>();
+  for (const w of solid) {
+    const ext: [number, number] = [0, 0];
+    (["a", "b"] as const).forEach((end, k) => {
+      const p = w[end];
+      const meeting = solid.filter((o) => o !== w && (d2(o.a, p) < TOL || d2(o.b, p) < TOL));
+      const onMiddle = solid.filter((o) => {
+        if (o === w || meeting.includes(o)) return false;
+        const L = len(o);
+        const t = ((p.x - o.a.x) * (o.b.x - o.a.x) + (p.y - o.a.y) * (o.b.y - o.a.y)) / L;
+        if (t <= TOL || t >= L - TOL) return false;
+        const dist = Math.abs((p.x - o.a.x) * (o.b.y - o.a.y) - (p.y - o.a.y) * (o.b.x - o.a.x)) / L;
+        return dist < o.thicknessM / 2 + 0.02;
+      });
+      if (onMiddle.length) { ext[k] = -Math.max(...onMiddle.map((o) => o.thicknessM / 2)); return; }
+      if (!meeting.length) { ext[k] = 0; return; }
+      const group = [w, ...meeting];
+      const straight = (x: Wall) => group.some((y) => {
+        if (y === x) return false;
+        const u = dir(x, p), v = dir(y, p);
+        return u.x * v.x + u.y * v.y < -0.98;
+      });
+      const primary = [...group].sort((x, y) => Number(straight(y)) - Number(straight(x)) || len(y) - len(x) || solid.indexOf(x) - solid.indexOf(y))[0];
+      ext[k] = primary === w ? Math.max(...meeting.map((o) => o.thicknessM / 2)) : -primary.thicknessM / 2;
+    });
+    out.set(w.id, ext);
+  }
+  return out;
 }
 
 function rot3(f: Furniture, dx: number, dy: number, y: number): Vec3 {

@@ -10,6 +10,34 @@ import { UnitMesh, type PickInfo } from "@/scene/UnitMesh";
 import { RoomHighlight } from "@/scene/RoomHighlight";
 import { WalkControls, type WalkPose } from "@/scene/WalkControls";
 import { MeasureTool, type Measure } from "@/scene/MeasureTool";
+import { roomViewpoint } from "@/lib/geom";
+
+/** Stand near one end of the room looking down its length, instead of at the centroid facing a wall. */
+function viewFrom(r: SceneRoom): { position: Vec3; yawDeg: number } {
+  const vp = roomViewpoint(r.polygon);
+  return { position: { x: vp.x, y: r.centroid.y, z: -vp.y }, yawDeg: vp.yawDeg };
+}
+
+/** Ground around the building at street level: lawn with a paved apron, so the villa sits on a site. */
+function Site({ scene, dusk }: { scene: PropertySceneGraph; dusk: boolean }) {
+  const street = [...scene.levels].sort((a, b) => Math.abs(a.elevationM) - Math.abs(b.elevationM))[0];
+  const y = (street?.elevationM ?? 0) - 0.07;
+  const b = scene.bounds;
+  const cx = (b.min.x + b.max.x) / 2, cz = (b.min.z + b.max.z) / 2;
+  const w = b.max.x - b.min.x + 6, d = b.max.z - b.min.z + 6;
+  return (
+    <group>
+      <mesh rotation-x={-Math.PI / 2} position={[cx, y - 0.01, cz]} receiveShadow>
+        <planeGeometry args={[220, 220]} />
+        <meshStandardMaterial color={dusk ? "#3d4a33" : "#7d9463"} roughness={1} />
+      </mesh>
+      <mesh rotation-x={-Math.PI / 2} position={[cx, y, cz]} receiveShadow>
+        <planeGeometry args={[w, d]} />
+        <meshStandardMaterial color={dusk ? "#8d8579" : "#d9d2c5"} roughness={0.9} />
+      </mesh>
+    </group>
+  );
+}
 
 export type ViewMode = "dollhouse" | "walk" | "plan";
 export type PlanOverlay = { url: string; pxPerM: number; originPx: { x: number; y: number }; imageW: number; imageH: number; elevationM: number };
@@ -37,21 +65,23 @@ export type ViewerProps = {
   canvasRef?: React.MutableRefObject<HTMLCanvasElement | null>;
 };
 
-function Lighting({ mood }: { mood: "day" | "dusk" }) {
+function Lighting({ mood, interior }: { mood: "day" | "dusk"; interior: boolean }) {
   const dusk = mood === "dusk";
   return (
     <>
-      <hemisphereLight args={[dusk ? "#ffd9b0" : "#f4efe6", "#3a342c", dusk ? 0.35 : 0.55]} />
+      <hemisphereLight args={[dusk ? "#ffd9b0" : "#f4efe6", "#6b6153", dusk ? 0.45 : interior ? 1.1 : 0.7]} />
+      {/* rooms are lit from inside too (cove and downlights), otherwise walk views under a ceiling go murky */}
+      {interior && <ambientLight intensity={dusk ? 0.35 : 0.45} color="#fff4e2" />}
       <directionalLight
         position={dusk ? [-14, 7, 6] : [10, 18, 8]}
         intensity={dusk ? 1.2 : 2.2}
         color={dusk ? "#ffb773" : "#fff6e8"}
         castShadow
         shadow-mapSize={[2048, 2048]}
-        shadow-camera-left={-25}
-        shadow-camera-right={25}
-        shadow-camera-top={25}
-        shadow-camera-bottom={-25}
+        shadow-camera-left={-40}
+        shadow-camera-right={40}
+        shadow-camera-top={40}
+        shadow-camera-bottom={-40}
         shadow-bias={-0.0004}
         shadow-radius={6}
       />
@@ -72,12 +102,19 @@ function CameraRig({ scene, mode, levelId, jumpTo, onAzimuth }: Pick<ViewerProps
   const { camera, size: viewport } = useThree();
   const b = scene.bounds;
   const lvl = levelId === "all" ? null : scene.levels.find((l) => l.id === levelId);
-  const center = useMemo(() => new THREE.Vector3((b.min.x + b.max.x) / 2, lvl ? lvl.elevationM : (b.min.y + b.max.y) / 2, (b.min.z + b.max.z) / 2), [b, lvl]);
-  const size = Math.max(b.max.x - b.min.x, b.max.z - b.min.z, 6);
+  // frame the floor being shown, not the whole plot (a basement car park can be twice a floor's size)
+  const frame = useMemo(() => {
+    const pts = scene.rooms.filter((r) => !lvl || r.levelId === lvl.id).flatMap((r) => r.polygon);
+    if (!pts.length) return { x: (b.min.x + b.max.x) / 2, z: (b.min.z + b.max.z) / 2, size: Math.max(b.max.x - b.min.x, b.max.z - b.min.z, 6) };
+    const xs = pts.map((p) => p.x), zs = pts.map((p) => -p.y);
+    return { x: (Math.min(...xs) + Math.max(...xs)) / 2, z: (Math.min(...zs) + Math.max(...zs)) / 2, size: Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...zs) - Math.min(...zs), 6) };
+  }, [scene.rooms, lvl, b]);
+  const center = useMemo(() => new THREE.Vector3(frame.x, lvl ? lvl.elevationM : (b.min.y + b.max.y) / 2, frame.z), [frame, b, lvl]);
+  const size = frame.size;
 
   useEffect(() => {
     if (mode === "dollhouse") {
-      camera.position.set(center.x + size * 0.55, center.y + size * 0.9, center.z + size * 0.85);
+      camera.position.set(center.x + size * 0.45, center.y + size * 0.8, center.z + size * 0.7);
       controls.current?.target.copy(center);
       controls.current?.update();
     } else if (mode === "plan") {
@@ -174,19 +211,23 @@ export default function Viewer3D(props: ViewerProps) {
   const walkLevel = levelId === "all" ? scene.spawn.levelId : levelId;
   const [walkStart, setWalkStart] = useState<{ position: Vec3; yawDeg: number }>(scene.spawn);
   useEffect(() => {
-    const onLevel = scene.spawn.levelId === walkLevel ? scene.spawn : (() => {
-      const r = scene.rooms.find((x) => x.levelId === walkLevel && x.program !== "balcony") ?? scene.rooms.find((x) => x.levelId === walkLevel);
-      return r ? { position: r.centroid, yawDeg: 0 } : scene.spawn;
-    })();
-    setWalkStart(onLevel);
+    if (props.jumpTo) {
+      const j = scene.rooms.find((x) => x.id === props.jumpTo!.roomId);
+      if (j && j.levelId === walkLevel) { setWalkStart(viewFrom(j)); return; }
+    }
+    const spawnRoom = scene.spawn.levelId === walkLevel
+      ? scene.rooms.find((r) => r.levelId === walkLevel && Math.hypot(r.centroid.x - scene.spawn.position.x, r.centroid.z - scene.spawn.position.z) < 0.01)
+      : [...scene.rooms].filter((x) => x.levelId === walkLevel && x.program !== "balcony").sort((a, b) => b.computedAreaM2 - a.computedAreaM2)[0];
+    setWalkStart(spawnRoom ? viewFrom(spawnRoom) : scene.spawn);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene.dossierHash, walkLevel]);
   useEffect(() => {
     if (mode !== "walk" || !props.jumpTo) return;
     const r = scene.rooms.find((x) => x.id === props.jumpTo!.roomId);
-    if (r) setWalkStart({ position: r.centroid, yawDeg: walkStart.yawDeg });
+    if (r) setWalkStart(viewFrom(r));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.jumpTo?.n]);
+  const showSite = mode !== "plan" && scene.levels.some((l) => visibleLevels.has(l.id) && l.elevationM >= -0.01);
 
   const onPick = (p: PickInfo) => {
     if (measuring) {
@@ -205,9 +246,11 @@ export default function Viewer3D(props: ViewerProps) {
         onCreated={({ gl }) => { if (props.canvasRef) props.canvasRef.current = gl.domElement; }}
         onPointerMissed={() => !measuring && props.onSelect?.(null)}
       >
-        <color attach="background" args={[mood === "dusk" ? "#141110" : "#15130f"]} />
+        <color attach="background" args={[mode === "plan" ? "#15130f" : mood === "dusk" ? "#2c2733" : "#dfe5e8"]} />
+        {mode !== "plan" && <fog attach="fog" args={[mood === "dusk" ? "#2c2733" : "#dfe5e8", 60, 180]} />}
+        {showSite && <Site scene={scene} dusk={mood === "dusk"} />}
         {mode === "plan" ? <OrthographicCamera makeDefault near={0.1} far={500} position={[0, 50, 0]} /> : <PerspectiveCamera makeDefault fov={mode === "walk" ? 70 : 42} near={0.05} far={500} />}
-        <Lighting mood={mood} />
+        <Lighting mood={mood} interior={mode === "walk"} />
         <UnitMesh scene={scene} jobId={jobId} showInferred={showInferred} showCeilings={mode === "walk"} visibleLevels={visibleLevels} onPick={onPick} onHover={setHover} />
         <RoomHighlight scene={scene} elementId={selectedId} pulseKey={props.pulseKey} />
         {overlay && mode === "plan" && <Overlay o={overlay} opacity={props.overlayOpacity ?? 0.55} />}
@@ -215,8 +258,9 @@ export default function Viewer3D(props: ViewerProps) {
         <Probe />
         {mode !== "walk" && (
           <>
-            <ContactShadows position={[0, scene.bounds.min.y - 0.01, 0]} opacity={0.35} scale={80} blur={2.5} far={20} />
-            {scene.rooms.filter((r) => visibleLevels.has(r.levelId) && (showInferred || !r.inferred)).map((r) => (
+            {!showSite && <ContactShadows position={[0, scene.bounds.min.y - 0.01, 0]} opacity={0.35} scale={80} blur={2.5} far={20} />}
+            {/* labels only for the floor being looked at, and not for cupboards and shafts, so they never pile up */}
+            {scene.rooms.filter((r) => (showInferred || !r.inferred) && (r.id === selectedId || (levelId !== "all" && r.levelId === levelId && (r.areaM2 >= 4 || mode === "plan")))).map((r) => (
               <Html key={r.id} position={[r.labelPos.x, mode === "plan" ? r.centroid.y + 0.1 : r.labelPos.y, r.labelPos.z]} center zIndexRange={[10, 0]} style={{ pointerEvents: "auto" }}>
                 <button
                   onClick={() => props.onRoomClick?.(r)}

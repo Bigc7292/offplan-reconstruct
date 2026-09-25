@@ -54,6 +54,50 @@ function addBox(b: TriBuffers, p: ScenePiece, pieceIdx: number) {
   for (const f of faces) addQuad(b, f.v.map((v) => tr(v[0], v[1], v[2])), rn(f.n[0], f.n[1], f.n[2]), f.uv, pieceIdx);
 }
 
+/** Box with every edge chamfered by `c` (6 inset faces, 12 edge strips, 8 corner triangles). */
+function addChamferBox(b: TriBuffers, p: ScenePiece, pieceIdx: number) {
+  if (p.shape.type !== "box") return;
+  const { center: ctr, size: s, rotY } = p.shape;
+  const hx = s.x / 2, hy = s.y / 2, hz = s.z / 2;
+  const c = Math.min(p.shape.bevel ?? 0, hx * 0.9, hy * 0.9, hz * 0.9);
+  const cos = Math.cos(rotY), sin = Math.sin(rotY);
+  const tr = (v: number[]) => [ctr.x + v[0] * cos + v[2] * sin, ctr.y + v[1], ctr.z - v[0] * sin + v[2] * cos];
+  const rn = (n: number[]) => {
+    const L = Math.hypot(n[0], n[1], n[2]) || 1;
+    return [(n[0] * cos + n[2] * sin) / L, n[1] / L, (-n[0] * sin + n[2] * cos) / L];
+  };
+  // the three points of corner (sx, sy, sz) lying on its x-, y- and z-faces
+  const P = (axis: 0 | 1 | 2, sx: number, sy: number, sz: number) =>
+    axis === 0 ? [sx * hx, sy * (hy - c), sz * (hz - c)] : axis === 1 ? [sx * (hx - c), sy * hy, sz * (hz - c)] : [sx * (hx - c), sy * (hy - c), sz * hz];
+  const face = (pts: number[][], n: number[]) => {
+    // wind counter-clockwise seen from outside
+    const e1 = pts[1].map((v, i) => v - pts[0][i]), e2 = pts[2].map((v, i) => v - pts[0][i]);
+    const cr = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+    if (cr[0] * n[0] + cr[1] * n[1] + cr[2] * n[2] < 0) pts = [...pts].reverse();
+    // world-scale planar UVs on the two axes the face is least aligned with
+    const ax = Math.abs(n[0]) >= Math.abs(n[1]) && Math.abs(n[0]) >= Math.abs(n[2]) ? 0 : Math.abs(n[1]) >= Math.abs(n[2]) ? 1 : 2;
+    const [u, v] = ax === 0 ? [2, 1] : ax === 1 ? [0, 2] : [0, 1];
+    const base = b.positions.length / 3;
+    const wn = rn(n);
+    for (const q of pts) {
+      const w = tr(q);
+      b.positions.push(w[0], w[1], w[2]);
+      b.normals.push(wn[0], wn[1], wn[2]);
+      b.uvs.push(q[u] + [hx, hy, hz][u], q[v] + [hx, hy, hz][v]);
+    }
+    for (let i = 1; i < pts.length - 1; i++) { b.indices.push(base, base + i, base + i + 1); b.triPiece.push(pieceIdx); }
+  };
+  const S = [-1, 1];
+  for (const sx of S) face([P(0, sx, -1, -1), P(0, sx, 1, -1), P(0, sx, 1, 1), P(0, sx, -1, 1)], [sx, 0, 0]);
+  for (const sy of S) face([P(1, -1, sy, -1), P(1, 1, sy, -1), P(1, 1, sy, 1), P(1, -1, sy, 1)], [0, sy, 0]);
+  for (const sz of S) face([P(2, -1, -1, sz), P(2, 1, -1, sz), P(2, 1, 1, sz), P(2, -1, 1, sz)], [0, 0, sz]);
+  if (c <= 1e-4) return;
+  for (const sx of S) for (const sy of S) face([P(0, sx, sy, -1), P(0, sx, sy, 1), P(1, sx, sy, 1), P(1, sx, sy, -1)], [sx, sy, 0]);
+  for (const sx of S) for (const sz of S) face([P(0, sx, -1, sz), P(0, sx, 1, sz), P(2, sx, 1, sz), P(2, sx, -1, sz)], [sx, 0, sz]);
+  for (const sy of S) for (const sz of S) face([P(1, -1, sy, sz), P(1, 1, sy, sz), P(2, 1, sy, sz), P(2, -1, sy, sz)], [0, sy, sz]);
+  for (const sx of S) for (const sy of S) for (const sz of S) face([P(0, sx, sy, sz), P(1, sx, sy, sz), P(2, sx, sy, sz)], [sx, sy, sz]);
+}
+
 function addPoly(b: TriBuffers, p: ScenePiece, pieceIdx: number) {
   if (p.shape.type !== "poly") return;
   const { polygon, y, thickness } = p.shape;
@@ -97,7 +141,7 @@ export function buildGroups(g: PropertySceneGraph): MeshGroup[] {
       grp = { key, levelId: p.levelId, materialId: p.materialId, layer, inferred: p.inferred, buffers: empty() };
       groups.set(key, grp);
     }
-    if (p.shape.type === "box") addBox(grp.buffers, p, i);
+    if (p.shape.type === "box") (p.shape.bevel ? addChamferBox : addBox)(grp.buffers, p, i);
     else addPoly(grp.buffers, p, i);
   });
   return [...groups.values()];
@@ -108,7 +152,7 @@ export function pieceBuffers(g: PropertySceneGraph, pieceIdxs: number[]): TriBuf
   const b = empty();
   for (const i of pieceIdxs) {
     const p = g.pieces[i];
-    if (p.shape.type === "box") addBox(b, p, i);
+    if (p.shape.type === "box") (p.shape.bevel ? addChamferBox : addBox)(b, p, i);
     else addPoly(b, p, i);
   }
   return b;

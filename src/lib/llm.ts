@@ -6,15 +6,20 @@
 //   LLM_PROVIDER=openai + LLM_BASE_URL + LLM_API_KEY + LLM_MODEL → any OpenAI-compatible
 //     gateway. LLM_API=chat (default) uses /v1/chat/completions, LLM_API=responses uses
 //     /v1/responses (some models, e.g. gpt-6-astra on OneProvider, only answer there).
+//   LLM_PROVIDER=claude-code → no API is called. Each request is written to the job's
+//     claude-code/ folder and Claude Code, running in this repo, answers it (see
+//     .claude/skills/read-brochure). Unanswered requests fall back to the local extractor.
 //   ANTHROPIC_API_KEY → Claude via the Anthropic SDK
 //   neither → the local extractor runs and no model is called.
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import * as z from "zod/v4";
 import sharp from "sharp";
-import { logModelCall } from "./store";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { jobFile, logModelCall } from "./store";
 
-export type ExtractorKind = "claude" | "openai" | "local";
+export type ExtractorKind = "claude" | "openai" | "claude-code" | "local";
 
 const OPENAI = {
   baseUrl: (process.env.LLM_BASE_URL ?? "").replace(/\/+$/, "").replace(/\/v1$/, ""),
@@ -25,17 +30,19 @@ const OPENAI = {
 };
 
 export function extractorKind(): ExtractorKind {
+  if (process.env.LLM_PROVIDER === "claude-code") return "claude-code";
   if (process.env.LLM_PROVIDER === "openai" && OPENAI.baseUrl && OPENAI.key && OPENAI.model) return "openai";
   return process.env.ANTHROPIC_API_KEY ? "claude" : "local";
 }
 
-export const MODEL = extractorKind() === "openai" ? OPENAI.model : process.env.ANTHROPIC_MODEL || "claude-opus-5";
+export const MODEL = extractorKind() === "openai" ? OPENAI.model : extractorKind() === "claude-code" ? "claude-code" : process.env.ANTHROPIC_MODEL || "claude-opus-5";
 
 /** Human label for the UI, e.g. "gpt-6-astra via api.example.dev". */
 export function extractorLabel(): string {
   const k = extractorKind();
   if (k === "openai") return `${OPENAI.model} via ${new URL(OPENAI.baseUrl).hostname}`;
   if (k === "claude") return `Claude (${MODEL})`;
+  if (k === "claude-code") return "Claude Code (no API key)";
   return "local (no model)";
 }
 
@@ -56,16 +63,88 @@ export async function callStructured<S extends z.ZodType>(jobId: string, opts: C
   const started = Date.now();
   try {
     const kind = extractorKind();
-    const { parsed, usage, stop } = kind === "openai" ? (OPENAI.api === "responses" ? await callResponses(opts) : await callOpenAI(opts)) : await callClaude(opts);
+    const { parsed, usage, stop } = kind === "claude-code" ? await callHandoff(jobId, opts) : kind === "openai" ? (OPENAI.api === "responses" ? await callResponses(opts) : await callOpenAI(opts)) : await callClaude(opts);
     await logModelCall(jobId, {
       task: opts.task, model: MODEL, schema: opts.schemaName, system: opts.system, prompt: opts.prompt,
       images: opts.images, usage, stop_reason: stop, ms: Date.now() - started,
     });
     return parsed;
   } catch (e) {
+    if (e instanceof PendingAnswer) throw e;
     await logModelCall(jobId, { task: opts.task, model: MODEL, schema: opts.schemaName, prompt: opts.prompt, images: opts.images, error: String(e), ms: Date.now() - started });
     throw e;
   }
+}
+
+// ───────────────────────── Claude Code hand-off ─────────────────────────
+
+/** Thrown while a request is waiting for Claude Code to answer it. Callers fall back to the local extractor. */
+export class PendingAnswer extends Error {}
+
+export const HANDOFF_DIR = "claude-code";
+
+/** "classify page 3" → "classify-page-003", so requests sort in page order. */
+export function handoffKey(task: string) {
+  return task.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+    .map((t) => t.replace(/^([a-z]*)(\d{1,2})$/, (_, p, d) => p + d.padStart(3, "0"))).join("-");
+}
+
+/**
+ * Writes the request (instructions, prompt, JSON Schema and the exact images a vision model would get)
+ * to claude-code/{key}/, then returns answer.json from the same folder once Claude Code has written it.
+ * The answer is validated against the same Zod schema as any model reply.
+ */
+async function callHandoff<S extends z.ZodType>(jobId: string, opts: CallOpts<S>) {
+  const key = handoffKey(opts.task);
+  const dir = jobFile(jobId, `${HANDOFF_DIR}/${key}`);
+  await fs.mkdir(dir, { recursive: true });
+  const images: Array<{ file: string; w: number; h: number }> = [];
+  for (const [i, src] of (opts.images ?? []).entries()) {
+    const buf = await imagePng(src);
+    const meta = await sharp(buf).metadata();
+    const file = `image-${i + 1}.png`;
+    await fs.writeFile(path.join(dir, file), buf);
+    images.push({ file, w: meta.width ?? 0, h: meta.height ?? 0 });
+  }
+  const schema = z.toJSONSchema(opts.schema);
+  await fs.writeFile(path.join(dir, "schema.json"), JSON.stringify(schema, null, 2));
+  const request = { key, task: opts.task, schemaName: opts.schemaName, images, requestedAt: new Date().toISOString() };
+  await fs.writeFile(path.join(dir, "request.json"), JSON.stringify(request, null, 2));
+  await fs.writeFile(path.join(dir, "request.md"), [
+    `# ${opts.task}`,
+    "",
+    "Answer by writing `answer.json` in this folder: one JSON object matching `schema.json`, nothing else.",
+    images.length ? `\nImages (look at each one; pixel coordinates refer to these exact files):\n${images.map((im) => `- ${im.file} (${im.w} × ${im.h} px)`).join("\n")}` : "",
+    "",
+    "## Instructions",
+    "",
+    opts.system,
+    "",
+    "## Request",
+    "",
+    opts.prompt,
+    "",
+  ].join("\n"));
+
+  let raw: string;
+  try {
+    raw = await fs.readFile(path.join(dir, "answer.json"), "utf8");
+  } catch {
+    throw new PendingAnswer(`waiting for Claude Code to answer ${HANDOFF_DIR}/${key}`);
+  }
+  let json: unknown;
+  try { json = JSON.parse(raw.trim().replace(/^```(?:json)?\s*|\s*```$/g, "")); } catch (e) {
+    await fs.writeFile(path.join(dir, "answer-error.txt"), `answer.json is not valid JSON: ${e}`);
+    throw new Error(`Claude Code answer for ${opts.task} is not valid JSON.`);
+  }
+  const parsed = opts.schema.safeParse(json);
+  if (!parsed.success) {
+    const why = parsed.error.issues.slice(0, 8).map((i) => `${i.path.join(".")}: ${i.message}`).join("\n");
+    await fs.writeFile(path.join(dir, "answer-error.txt"), why);
+    throw new Error(`Claude Code answer for ${opts.task} does not match schema ${opts.schemaName}: ${why.split("\n").slice(0, 3).join("; ")}`);
+  }
+  await fs.rm(path.join(dir, "answer-error.txt"), { force: true });
+  return { parsed: parsed.data as z.infer<S>, usage: undefined, stop: "answered" };
 }
 
 async function callClaude<S extends z.ZodType>(opts: CallOpts<S>) {
