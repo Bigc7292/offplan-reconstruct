@@ -1,6 +1,7 @@
 // Listing URL ingest: full HTML, rendered screenshot (Playwright if a Chromium is available),
 // every <img>, OG tags, JSON-LD (RealEstateListing etc.), visible body text, and linked brochure PDFs.
 // Never scrapes behind logins: 401/403, login walls and captchas mark the source "blocked".
+import crypto from "node:crypto";
 import fs from "node:fs";
 
 export type UrlIngest = {
@@ -86,15 +87,36 @@ function chromiumPath(): string | undefined {
   return undefined;
 }
 
+/**
+ * Behind an intercepting proxy whose CA Node is told about (NODE_EXTRA_CA_CERTS), Chromium must trust that
+ * CA too, or every HTTPS page comes back as a certificate warning. Trust exactly those certificates' keys.
+ */
+function extraCaSpki(): string[] {
+  const file = process.env.NODE_EXTRA_CA_CERTS;
+  if (!file || !fs.existsSync(file)) return [];
+  const pems = fs.readFileSync(file, "utf8").match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? [];
+  const out: string[] = [];
+  for (const pem of pems) {
+    try {
+      const der = new crypto.X509Certificate(pem).publicKey.export({ type: "spki", format: "der" });
+      out.push(crypto.createHash("sha256").update(der).digest("base64"));
+    } catch { /* skip unreadable */ }
+  }
+  return out;
+}
+
 async function screenshot(url: string): Promise<{ png: Buffer; html: string } | null> {
   const exe = chromiumPath();
   if (!exe) return null;
   try {
     const { chromium } = await import("playwright-core");
-    const browser = await chromium.launch({ executablePath: exe, args: ["--no-sandbox"] });
+    const spki = extraCaSpki();
+    const browser = await chromium.launch({ executablePath: exe, args: ["--no-sandbox", ...(spki.length ? [`--ignore-certificate-errors-spki-list=${spki.join(",")}`] : [])] });
     try {
       const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, userAgent: UA });
       await page.goto(url, { waitUntil: "networkidle", timeout: 30_000 }).catch(() => page.waitForLoadState("domcontentloaded"));
+      // a browser error page (certificate warning, no connection) is not the listing: never read it as one
+      if (page.url().startsWith("chrome-error://") || /privacy error|connection is not private|ERR_[A-Z_]+/i.test(await page.title().catch(() => ""))) return null;
       const png = await page.screenshot({ fullPage: true, type: "png" });
       const html = await page.content();
       return { png: Buffer.from(png), html };

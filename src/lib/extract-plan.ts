@@ -338,7 +338,9 @@ export function captionFloorRoom(caption?: string): { floor: string; room: strin
   return { floor: m[1].replace(/\s+/g, " ").replace(/^\w/, (c) => c.toUpperCase()), room: m[2].replace(/\s+/g, " ") };
 }
 
-const KEY_PLAN_GAP_M = 3;
+const KEY_PLAN_GAP_M = 0.4;
+/** key plans on a floor are packed in rows no wider than this, so the floor reads as one compact house */
+const KEY_PLAN_ROW_M = 17;
 
 /**
  * Levels from key plans (the crop of the architect's plan printed beside each render) when the sources have no floor
@@ -382,7 +384,7 @@ async function keyPlanLevels(
     });
   }))));
 
-  const byFloor = new Map<string, Level & { cursor: number }>();
+  const byFloor = new Map<string, Level & { cursor: number; rowY: number; rowH: number }>();
   let n = 0;
   for (const [gi, g] of groups.entries()) {
     const r = await outs[gi];
@@ -399,18 +401,21 @@ async function keyPlanLevels(
     const levelId = `L-kp-${floorName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
     let L = byFloor.get(floorName);
     if (!L) {
-      L = { id: levelId, name: floorName, elevationM: 0, heightM, rooms: [], walls: [], furniture: [], layout: "key_plans", renderViews: [], cursor: 0 };
+      L = { id: levelId, name: floorName, elevationM: 0, heightM, rooms: [], walls: [], furniture: [], layout: "key_plans", renderViews: [], cursor: 0, rowY: 0, rowH: 0 };
       byFloor.set(floorName, L);
     }
     const xs = [...frag.rooms.flatMap((q) => q.polygon.map((p) => p.x)), ...frag.walls.flatMap((w) => [w.a.x, w.b.x])];
     const ys = [...frag.rooms.flatMap((q) => q.polygon.map((p) => p.y)), ...frag.walls.flatMap((w) => [w.a.y, w.b.y])];
     if (!xs.length) continue;
-    const [minX, maxX, minY] = [Math.min(...xs), Math.max(...xs), Math.min(...ys)];
+    const [minX, maxX, minY, maxY] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
     // a key plan whose rooms are already on this floor is a repeat of a drawing traced before: only its cameras are new
     const base = (s: string) => s.replace(/\s*\(part\)\s*$/i, "").trim().toLowerCase();
     const whole = frag.rooms.filter((q) => !/\(part\)\s*$/i.test(q.name));
     const repeat = whole.length > 0 && whole.every((q) => L!.rooms.some((x) => base(x.name) === base(q.name)));
-    let dx = L.cursor - minX, dy = -minY;
+    // shelf packing: next to the previous key plan, or at the start of a new row when this one would overflow it
+    const wide = maxX - minX, tall = maxY - minY;
+    if (!repeat && L.cursor > 0 && L.cursor + wide > KEY_PLAN_ROW_M) { L.cursor = 0; L.rowY += L.rowH + KEY_PLAN_GAP_M; L.rowH = 0; }
+    let dx = L.cursor - minX, dy = L.rowY - minY;
     if (repeat) {
       const q = whole[0], x = L.rooms.find((y) => base(y.name) === base(q.name))!;
       const c = (poly: { x: number; y: number }[]) => ({ x: poly.reduce((s, p) => s + p.x, 0) / poly.length, y: poly.reduce((s, p) => s + p.y, 0) / poly.length });
@@ -436,13 +441,14 @@ async function keyPlanLevels(
       L.walls.push({ ...w, id, a: sh(w.a), b: sh(w.b), evidence: w.evidence.map(toPage), openings: w.openings.map((o, k) => ({ ...o, id: `${id}-o${k + 1}`, wallId: id, evidence: o.evidence.map(toPage) })) });
     }
     for (const f of frag.furniture ?? []) L.furniture!.push({ ...f, id: `${levelId}-f${++n}`, center: sh(f.center), evidence: f.evidence.map(toPage) });
-    L.cursor += maxX - minX + KEY_PLAN_GAP_M;
+    L.cursor += wide + KEY_PLAN_GAP_M;
+    L.rowH = Math.max(L.rowH, tall);
     await log(jobId, "extract", `${floorName}: key plan p${g.rep.page} traced (${frag.rooms.length} room(s), scale from ${out.scaleSource}).`);
   }
-  const levels = [...byFloor.values()].map(({ cursor: _c, ...l }) => l as Level);
+  const levels = [...byFloor.values()].map(({ cursor: _c, rowY: _y, rowH: _h, ...l }) => l as Level);
   if (levels.length) {
     await onLevel?.(levels);
-    warnings.push("No floor plan was published for this property. Rooms are traced from the key plans printed beside the renders; key plans print no dimensions, so their scale comes from standard door and furniture sizes. Rooms on a floor are shown side by side: where they sit on the floor is not documented.");
+    warnings.push("No floor plan was published for this property. Rooms are traced from the key plans printed beside the renders; key plans print no dimensions, so their scale comes from standard door and furniture sizes. Rooms on a floor are packed together: where they sit on the floor is not documented.");
   }
   return { levels, warnings };
 }

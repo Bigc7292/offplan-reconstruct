@@ -18,6 +18,7 @@ import sharp from "sharp";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { jobFile, logModelCall } from "./store";
+import { PLAN_FURNITURE_KINDS } from "./schema";
 
 export type ExtractorKind = "claude" | "openai" | "claude-code" | "local";
 
@@ -315,7 +316,7 @@ export const PlanLevelSchema = z.object({
     kind: z.enum(["exterior", "interior", "railing", "glass", "partition"]),
     openings: z.array(z.object({ kind: z.enum(["door", "sliding_door", "window", "opening"]), offset: z.number().describe("0-1 along a→b, centre"), width: z.number() })),
   })),
-  furniture: z.array(z.object({ kind: z.enum(["bed_double", "bed_single", "sofa", "dining", "kitchen_run", "island", "wardrobe", "bath", "wc", "vanity", "desk", "armchair", "other"]), center: P2, w: z.number(), d: z.number(), rotationDeg: z.number() })),
+  furniture: z.array(z.object({ kind: z.enum(PLAN_FURNITURE_KINDS), center: P2, w: z.number(), d: z.number(), rotationDeg: z.number() })),
   dimensionStrings: z.array(z.string()),
 });
 export type PlanLevelOut = z.infer<typeof PlanLevelSchema>;

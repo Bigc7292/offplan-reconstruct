@@ -437,7 +437,7 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
     dossierHash: dossierHash(d),
     demo: !!d.demo,
     unitTypeId: d.selectedUnitTypeId,
-    title: [d.projectName, d.unitTypes.find((u) => u.id === d.selectedUnitTypeId)?.code].filter(Boolean).join(" · ") || "Untitled property",
+    title: titleOf(d),
     disclaimer: DISCLAIMER,
     northDeg: d.northDeg,
     levels: levels.map((l) => ({ id: l.id, name: l.name, elevationM: l.elevationM, heightM: l.heightM })),
@@ -464,6 +464,14 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
 
 
 // ───────────────────────── helpers ─────────────────────────
+
+/** The property's name for titles: the project and its unit type, else the community it is in. */
+function titleOf(d: PropertyDossier): string {
+  const fact = (re: RegExp) => d.facts.find((f) => re.test(f.key))?.value.trim();
+  const name = d.projectName ?? fact(/^project\.name$/) ?? (fact(/^community$/) ? `${fact(/^community$/)} villa` : undefined);
+  const code = d.unitTypes.find((u) => u.id === d.selectedUnitTypeId)?.code;
+  return [name, code && !/unassigned|unknown/i.test(code) ? code : undefined].filter(Boolean).join(" · ") || "Untitled property";
+}
 
 function to3(p: Vec2, y: number): Vec3 {
   return { x: round(p.x), y: round(y), z: round(-p.y) };
