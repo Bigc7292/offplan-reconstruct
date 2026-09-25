@@ -12,9 +12,9 @@ import { dHash, hamming, imageStats } from "./image-stats";
 import { ocrImage } from "./ocr";
 import type { NewJobInput } from "./pipeline";
 
-export type AssetIndexEntry = IngestedAsset & { sourceId: string; alt?: string; origin: "pdf_crop" | "page" | "url_image" | "upload" };
+export type AssetIndexEntry = IngestedAsset & { sourceId: string; alt?: string; origin: "pdf_crop" | "page" | "url_image" | "upload"; /** what a crop cut from a scanned page is */ cut?: "render" | "key_plan" };
 
-const safeName = (s: string) => s.replace(/[^a-z0-9._-]+/gi, "_").slice(0, 120);
+export const safeName = (s: string) => s.replace(/[^a-z0-9._-]+/gi, "_").slice(0, 120);
 
 export async function registerSources(jobId: string, input: NewJobInput) {
   const sources: SourceRecord[] = [];
@@ -44,18 +44,15 @@ export async function registerSources(jobId: string, input: NewJobInput) {
   await updateJob(jobId, (j) => { j.sources = sources; });
 }
 
-async function isPrivateHost(url: string) {
+export async function isPrivateHost(url: string) {
   if (process.env.ALLOW_PRIVATE_URLS === "1") return false;
   const host = new URL(url).hostname;
   const addrs = net.isIP(host) ? [host] : (await dns.lookup(host, { all: true }).catch(() => [])).map((a) => a.address);
   return addrs.some((a) => /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.|::1$|fc|fd|fe80)/i.test(a));
 }
 
-export async function ingestAll(jobId: string) {
-  const job = (await readJob(jobId))!;
-  const pages: PageRecord[] = [];
-  const assets: AssetIndexEntry[] = [];
-  const extraSources: SourceRecord[] = [];
+/** Page and image ingest that appends to the given lists (pages are numbered after the ones already there). */
+function ingestor(jobId: string, pages: PageRecord[], assets: AssetIndexEntry[]) {
   const nextN = () => pages.length + 1;
 
   const addPdf = async (src: SourceRecord, data: Buffer) => {
@@ -90,6 +87,37 @@ export async function ingestAll(jobId: string) {
     });
     assets.push({ id: `a${n}-${hash.slice(0, 8)}`, path: rel, page: n, bbox: [0, 0, 1, 1], hash, w: meta.width!, h: meta.height!, sourceId: src.id, alt, origin });
   };
+  return { addPdf, addImage, nextN };
+}
+
+/**
+ * Ingest sources added after the first ingest (floor plans found online). Existing pages keep their numbers;
+ * the new pages come after them. Returns the new pages and their assets (not yet labelled).
+ */
+export async function appendSources(jobId: string, added: Array<{ src: SourceRecord; data: Buffer }>) {
+  const job = (await readJob(jobId))!;
+  const pages = [...job.pages];
+  const assets = await readAssetIndex(jobId);
+  const before = { pages: pages.length, assets: assets.length };
+  const { addPdf, addImage } = ingestor(jobId, pages, assets);
+  for (const { src, data } of added) {
+    if (src.kind === "pdf") await addPdf(src, data);
+    else await addImage(src, data, src.name, "upload");
+  }
+  await writeJobFile(jobId, "assets-index.json", JSON.stringify(assets, null, 2));
+  await updateJob(jobId, (j) => {
+    j.pages = pages;
+    j.sources = [...j.sources, ...added.map((a) => a.src).filter((s) => !j.sources.some((x) => x.id === s.id))];
+  });
+  return { pages: pages.slice(before.pages), assets: assets.slice(before.assets) };
+}
+
+export async function ingestAll(jobId: string) {
+  const job = (await readJob(jobId))!;
+  const pages: PageRecord[] = [];
+  const assets: AssetIndexEntry[] = [];
+  const extraSources: SourceRecord[] = [];
+  const { addPdf, addImage, nextN } = ingestor(jobId, pages, assets);
 
   for (const src of job.sources) {
     try {

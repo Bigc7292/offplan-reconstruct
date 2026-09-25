@@ -116,7 +116,8 @@ if (cmd === "new") {
   // validate answers without re-running the pipeline (safe to run while other answers are being written)
   const j = await mustJob(args[0]);
   const llm = await import("../src/lib/llm");
-  const schemas: Record<string, import("zod/v4").ZodType> = { PageClassification: llm.ClassifySchema, Facts: llm.FactsSchema, Level: llm.PlanLevelSchema, "Material[]": llm.CgiSchema };
+  const { FindPlansSchema } = await import("../src/lib/find-plans");
+  const schemas: Record<string, import("zod/v4").ZodType> = { PageClassification: llm.ClassifySchema, Facts: llm.FactsSchema, Level: llm.PlanLevelSchema, KeyPlan: llm.KeyPlanSchema, "Material[]": llm.CgiSchema, FindPlans: FindPlansSchema };
   let bad = 0, ok = 0, todo = 0;
   for (const r of await requests(j.id)) {
     const req = JSON.parse(await fs.readFile(path.join(r.dir, "request.json"), "utf8"));
@@ -139,8 +140,8 @@ if (cmd === "new") {
   const sketch = JSON.parse(await fs.readFile(path.join(dir, "plan-sketch.json"), "utf8"));
   const out = sketchToPlan(sketch, img.w, img.h);
   const llm = await import("../src/lib/llm");
-  llm.PlanLevelSchema.parse(out);
-  await fs.writeFile(path.join(dir, "answer.json"), JSON.stringify(out, null, 2));
+  (req.schemaName === "KeyPlan" ? llm.KeyPlanSchema : llm.PlanLevelSchema).parse({ cameras: [], ...out });
+  await fs.writeFile(path.join(dir, "answer.json"), JSON.stringify(req.schemaName === "KeyPlan" ? { cameras: [], ...out } : out, null, 2));
   const colour = { exterior: "#d11", interior: "#06c", glass: "#0bb", railing: "#a0a", partition: "#888" } as Record<string, string>;
   const svg = [`<svg xmlns="http://www.w3.org/2000/svg" width="${img.w}" height="${img.h}">`,
     ...out.rooms.map((r) => `<polygon points="${r.polygon.map((p) => `${p.x},${p.y}`).join(" ")}" fill="rgba(255,200,0,0.18)" stroke="none"/>`),

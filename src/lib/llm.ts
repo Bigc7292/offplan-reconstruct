@@ -320,6 +320,23 @@ export const PlanLevelSchema = z.object({
 });
 export type PlanLevelOut = z.infer<typeof PlanLevelSchema>;
 
+/** A key plan: the crop of the architect's plan printed beside a render, with the render's camera marker. */
+export const KeyPlanSchema = PlanLevelSchema.extend({
+  cameras: z.array(z.object({
+    page: z.number().nullable().describe("brochure page of the render this marker belongs to (null: the first image's page)"),
+    at: P2.describe("apex of the camera marker (where the render was taken from)"),
+    look: P2.describe("middle of the marker's far edge (where the render looks)"),
+  })).describe("the render camera markers, in the same units as the rooms; markers from the other images of the same key plan go at the same spot on the first image's drawing"),
+});
+export type KeyPlanOut = z.infer<typeof KeyPlanSchema>;
+
+export const KEY_PLAN_SYSTEM = `You are an architectural draughtsman tracing a key plan: a crop of the architect's floor plan printed beside a render in a sales brochure, showing the room in the render and parts of its neighbours.
+- Trace every room whose outline is inside the crop, named exactly as labelled. A room cut off by the crop edge: trace the visible part and add " (part)" to its name. Do not invent rooms the crop does not show.
+- Walls, doors (swing arcs), sliding doors, windows and glazing as drawn; furniture as drawn (beds, sofas, tables, desks, vanities, WCs, baths, wardrobes).
+- Key plans print no dimensions or scale bar. Take the scale from standard parts: a swing door leaf is about 0.9 m, a double bed 1.8 m wide by 2.0 m long, a WC about 0.7 m deep. Say which one in scaleSource and keep scaleConfidence at 0.4 or less.
+- The coloured triangle is the render's camera: give it in cameras (apex = where the camera stands, look = the middle of the triangle's far edge).
+- Return ONLY JSON.`;
+
 export const CGI_SYSTEM = `Identify materials, colors, fixtures, and likely room.
 Return Material[] plus a short lighting mood.
 Quote any visible caption. Do not guess stone names that are not written or obvious.`;

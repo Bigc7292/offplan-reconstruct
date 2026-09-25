@@ -13,7 +13,8 @@ import { inferredEvidence } from "./schema";
 import { LEVEL_WORDS, ROOM_WORDS } from "./classify";
 import type { AssetIndexEntry } from "./ingest";
 import { limiter, settle, MODEL_CONCURRENCY } from "./concurrency";
-import { callStructured, PLAN_SYSTEM, PlanLevelSchema, type PlanLevelOut } from "./llm";
+import { callStructured, KEY_PLAN_SYSTEM, KeyPlanSchema, PLAN_SYSTEM, PlanLevelSchema, type KeyPlanOut, type PlanLevelOut } from "./llm";
+import { hamming } from "./image-stats";
 import { jobFile, log } from "./store";
 import { DEFAULT_CEILING_M } from "./reconstruct";
 import { round } from "./geom";
@@ -106,7 +107,14 @@ export async function extractPlans(
   const planAssetIds: string[] = [];
   let northDeg: number | undefined;
   const planPages = pages.filter((p) => p.labels.some((l) => l === "unit_plan" || l === "typical_floor" || l === "furniture_layout"));
-  if (!planPages.length) warnings.push("No floor plan found. Add the unit plan page or another brochure to reconstruct geometry.");
+  const keyPlans = assets.filter((a) => a.kind === "key_plan");
+  if (!planPages.length && keyPlans.length) {
+    // no floor plan anywhere: the key plans beside the renders are the only drawings of the rooms
+    const kp = await keyPlanLevels(jobId, pages, assets, keyPlans, useClaude, ceilingFact, onLevel);
+    levels.push(...kp.levels);
+    warnings.push(...kp.warnings);
+    planAssetIds.push(...keyPlans.map((a) => a.id));
+  } else if (!planPages.length) warnings.push("No floor plan found. Add the unit plan page or another brochure to reconstruct geometry.");
 
   const planImgsFor = (p: PageRecord) => {
     const crops = assets.filter((a) => a.page === p.n && (a.kind === "unit_plan" || a.kind === "floor_plan"));
@@ -321,4 +329,120 @@ export function areaFromDims(s: string): number | undefined {
   if (a > 100) a /= 1000;
   if (b > 100) b /= 1000;
   return round(a * b, 2);
+}
+
+/** "Ground floor - Formal living" → { floor: "Ground floor", room: "Formal living" } */
+export function captionFloorRoom(caption?: string): { floor: string; room: string } | undefined {
+  const m = caption?.match(/^\s*((?:lower\s+|upper\s+)?(?:basement|ground|first|second|third|fourth|roof\s*top|rooftop|roof|mezzanine|podium|level\s*\d+|\d+(?:st|nd|rd|th))(?:\s*floor)?)\s*[-–:|]\s*(.+?)\s*$/i);
+  if (!m) return undefined;
+  return { floor: m[1].replace(/\s+/g, " ").replace(/^\w/, (c) => c.toUpperCase()), room: m[2].replace(/\s+/g, " ") };
+}
+
+const KEY_PLAN_GAP_M = 3;
+
+/**
+ * Levels from key plans (the crop of the architect's plan printed beside each render) when the sources have no floor
+ * plan. The same key plan is often printed beside several renders of one room with only the camera marker moved: those
+ * are traced once. Each distinct key plan becomes a group of rooms on its floor, set side by side, because where the
+ * rooms sit on the floor is not documented. The camera markers become render viewpoints for the walkthrough.
+ */
+async function keyPlanLevels(
+  jobId: string, pages: PageRecord[], assets: LabelledAsset[], keyPlans: LabelledAsset[], useClaude: boolean,
+  ceilingFact: { value: number; evidence: Evidence } | undefined, onLevel?: (levels: Level[]) => Promise<void>,
+): Promise<{ levels: Level[]; warnings: string[] }> {
+  const warnings: string[] = [];
+  const heightM = ceilingFact?.value ?? DEFAULT_CEILING_M;
+  const pageOf = (n?: number) => pages.find((p) => p.n === n);
+  type Group = { rep: LabelledAsset; members: LabelledAsset[]; floor: string; rooms: string[] };
+  const groups: Group[] = [];
+  for (const a of [...keyPlans].sort((x, y) => (x.page ?? 0) - (y.page ?? 0))) {
+    const cf = captionFloorRoom(pageOf(a.page)?.caption);
+    const floor = cf?.floor ?? "Unassigned";
+    const g = groups.find((x) => x.floor === floor && hamming(x.rep.hash, a.hash) <= 12);
+    if (g) {
+      g.members.push(a);
+      if (cf && !g.rooms.includes(cf.room)) g.rooms.push(cf.room);
+    } else groups.push({ rep: a, members: [a], floor, rooms: cf ? [cf.room] : [] });
+  }
+  if (!useClaude) {
+    warnings.push(`No floor plan: ${groups.length} key plan(s) beside the renders can be traced by a vision model (set an extractor) or by hand in the plan editor.`);
+    return { levels: [], warnings };
+  }
+  const run = limiter(MODEL_CONCURRENCY);
+  const outs = await Promise.all(groups.map((g) => settle(run(() => {
+    const pagesList = g.members.map((m) => m.page).join(", ");
+    return callStructured(jobId, {
+      task: `key plan p${g.rep.page}`, system: KEY_PLAN_SYSTEM, schema: KeyPlanSchema, schemaName: "KeyPlan",
+      prompt: [
+        `Key plan printed beside the render${g.members.length > 1 ? "s" : ""} on page${g.members.length > 1 ? "s" : ""} ${pagesList}.`,
+        `Caption${g.members.length > 1 ? "s" : ""}: ${[...new Set(g.members.map((m) => pageOf(m.page)?.caption).filter(Boolean))].join(" / ")}. Floor: ${g.floor}.`,
+        g.members.length > 1 ? `Image 1 is the key plan from page ${g.rep.page}; images 2-${g.members.length} are the same key plan from pages ${g.members.slice(1).map((m) => m.page).join(", ")}, where only the camera marker moves. Trace the rooms on image 1 and give every image's camera marker at its spot on image 1's drawing, with its page.` : "",
+      ].filter(Boolean).join("\n"),
+      images: g.members.map((m) => jobFile(jobId, m.path)),
+    });
+  }))));
+
+  const byFloor = new Map<string, Level & { cursor: number }>();
+  let n = 0;
+  for (const [gi, g] of groups.entries()) {
+    const r = await outs[gi];
+    if (!r.ok) {
+      warnings.push(`Key plan on page ${g.rep.page} (${g.rooms.join(", ") || g.floor}) not traced yet: ${r.error instanceof Error ? r.error.message : r.error}`);
+      continue;
+    }
+    const out = r.value as KeyPlanOut;
+    const frag = planOutToLevel(out, { levelId: `kp${gi}`, pageN: g.rep.page!, img: g.rep, heightM, ceilingFact });
+    // evidence boxes come back in key-plan coordinates: map them onto the page
+    const kb = g.rep.bbox;
+    const toPage = (e: Evidence): Evidence => (e.bbox ? { ...e, bbox: [kb[0] + e.bbox[0] * (kb[2] - kb[0]), kb[1] + e.bbox[1] * (kb[3] - kb[1]), kb[0] + e.bbox[2] * (kb[2] - kb[0]), kb[1] + e.bbox[3] * (kb[3] - kb[1])] } : { ...e, bbox: kb });
+    const floorName = canonicalLevelName(g.floor);
+    const levelId = `L-kp-${floorName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    let L = byFloor.get(floorName);
+    if (!L) {
+      L = { id: levelId, name: floorName, elevationM: 0, heightM, rooms: [], walls: [], furniture: [], layout: "key_plans", renderViews: [], cursor: 0 };
+      byFloor.set(floorName, L);
+    }
+    const xs = [...frag.rooms.flatMap((q) => q.polygon.map((p) => p.x)), ...frag.walls.flatMap((w) => [w.a.x, w.b.x])];
+    const ys = [...frag.rooms.flatMap((q) => q.polygon.map((p) => p.y)), ...frag.walls.flatMap((w) => [w.a.y, w.b.y])];
+    if (!xs.length) continue;
+    const [minX, maxX, minY] = [Math.min(...xs), Math.max(...xs), Math.min(...ys)];
+    // a key plan whose rooms are already on this floor is a repeat of a drawing traced before: only its cameras are new
+    const base = (s: string) => s.replace(/\s*\(part\)\s*$/i, "").trim().toLowerCase();
+    const whole = frag.rooms.filter((q) => !/\(part\)\s*$/i.test(q.name));
+    const repeat = whole.length > 0 && whole.every((q) => L!.rooms.some((x) => base(x.name) === base(q.name)));
+    let dx = L.cursor - minX, dy = -minY;
+    if (repeat) {
+      const q = whole[0], x = L.rooms.find((y) => base(y.name) === base(q.name))!;
+      const c = (poly: { x: number; y: number }[]) => ({ x: poly.reduce((s, p) => s + p.x, 0) / poly.length, y: poly.reduce((s, p) => s + p.y, 0) / poly.length });
+      const [c1, c0] = [c(x.polygon), c(q.polygon)];
+      dx = c1.x - c0.x;
+      dy = c1.y - c0.y;
+    }
+    const sh = (p: { x: number; y: number }) => ({ x: round(p.x + dx), y: round(p.y + dy) });
+    const toM = (v: { x: number; y: number }) => {
+      if (out.units === "meters") return v;
+      const b = out.planBoundsPx, ppm = out.pxPerMeter && out.pxPerMeter > 0 ? out.pxPerMeter : g.rep.w / 20;
+      return { x: (v.x - b.x0) / ppm, y: (b.y1 - v.y) / ppm };
+    };
+    for (const cam of out.cameras) {
+      const page = cam.page ?? g.rep.page!;
+      const render = assets.find((a) => a.page === page && (a.kind === "cgi_interior" || a.kind === "cgi_exterior"));
+      L.renderViews!.push({ page, caption: pageOf(page)?.caption, renderAssetId: render?.id, at: sh(toM(cam.at)), look: sh(toM(cam.look)) });
+    }
+    if (repeat) continue;
+    for (const q of frag.rooms) L.rooms.push({ ...q, id: `${levelId}-r${++n}`, levelId, polygon: q.polygon.map(sh), evidence: q.evidence.map(toPage) });
+    for (const w of frag.walls) {
+      const id = `${levelId}-w${++n}`;
+      L.walls.push({ ...w, id, a: sh(w.a), b: sh(w.b), evidence: w.evidence.map(toPage), openings: w.openings.map((o, k) => ({ ...o, id: `${id}-o${k + 1}`, wallId: id, evidence: o.evidence.map(toPage) })) });
+    }
+    for (const f of frag.furniture ?? []) L.furniture!.push({ ...f, id: `${levelId}-f${++n}`, center: sh(f.center), evidence: f.evidence.map(toPage) });
+    L.cursor += maxX - minX + KEY_PLAN_GAP_M;
+    await log(jobId, "extract", `${floorName}: key plan p${g.rep.page} traced (${frag.rooms.length} room(s), scale from ${out.scaleSource}).`);
+  }
+  const levels = [...byFloor.values()].map(({ cursor: _c, ...l }) => l as Level);
+  if (levels.length) {
+    await onLevel?.(levels);
+    warnings.push("No floor plan was published for this property. Rooms are traced from the key plans printed beside the renders; key plans print no dimensions, so their scale comes from standard door and furniture sizes. Rooms on a floor are shown side by side: where they sit on the floor is not documented.");
+  }
+  return { levels, warnings };
 }

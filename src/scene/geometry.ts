@@ -38,13 +38,22 @@ function addQuad(b: TriBuffers, pts: number[][], n: number[], uv: number[][], pi
 const CAPPED = new Set(["wall", "lintel", "sill"]);
 export const CAP_MATERIAL = "auto:cap";
 
+/** local → world for a box: tilt about x by `pitch`, rotate about Y by rotY (three.js convention), then translate */
+function boxFrame(c: { x: number; y: number; z: number }, rotY: number, pitch = 0) {
+  const cos = Math.cos(rotY), sin = Math.sin(rotY);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const rn = (x: number, y: number, z: number) => {
+    const y1 = y * cp - z * sp, z1 = y * sp + z * cp;
+    return [x * cos + z1 * sin, y1, -x * sin + z1 * cos];
+  };
+  const tr = (x: number, y: number, z: number) => { const r = rn(x, y, z); return [c.x + r[0], c.y + r[1], c.z + r[2]]; };
+  return { tr, rn };
+}
+
 function addBox(b: TriBuffers, p: ScenePiece, pieceIdx: number, cap?: TriBuffers) {
   if (p.shape.type !== "box") return;
   const { center: c, size: s, rotY } = p.shape;
-  const cos = Math.cos(rotY), sin = Math.sin(rotY);
-  // local → world: rotate about Y by rotY (three.js convention), then translate
-  const tr = (x: number, y: number, z: number) => [c.x + x * cos + z * sin, c.y + y, c.z - x * sin + z * cos];
-  const rn = (x: number, y: number, z: number) => [x * cos + z * sin, y, -x * sin + z * cos];
+  const { tr, rn } = boxFrame(c, rotY, p.shape.pitch);
   const hx = s.x / 2, hy = s.y / 2, hz = s.z / 2;
   // world-scale UVs (1 unit = 1 m) so textures tile at real size
   const faces: Array<{ n: number[]; v: number[][]; uv: number[][] }> = [
@@ -64,11 +73,11 @@ function addChamferBox(b: TriBuffers, p: ScenePiece, pieceIdx: number) {
   const { center: ctr, size: s, rotY } = p.shape;
   const hx = s.x / 2, hy = s.y / 2, hz = s.z / 2;
   const c = Math.min(p.shape.bevel ?? 0, hx * 0.9, hy * 0.9, hz * 0.9);
-  const cos = Math.cos(rotY), sin = Math.sin(rotY);
-  const tr = (v: number[]) => [ctr.x + v[0] * cos + v[2] * sin, ctr.y + v[1], ctr.z - v[0] * sin + v[2] * cos];
+  const frame = boxFrame(ctr, rotY, p.shape.pitch);
+  const tr = (v: number[]) => frame.tr(v[0], v[1], v[2]);
   const rn = (n: number[]) => {
     const L = Math.hypot(n[0], n[1], n[2]) || 1;
-    return [(n[0] * cos + n[2] * sin) / L, n[1] / L, (-n[0] * sin + n[2] * cos) / L];
+    return frame.rn(n[0] / L, n[1] / L, n[2] / L);
   };
   // the three points of corner (sx, sy, sz) lying on its x-, y- and z-faces
   const P = (axis: 0 | 1 | 2, sx: number, sy: number, sz: number) =>
@@ -107,35 +116,59 @@ function addPoly(b: TriBuffers, p: ScenePiece, pieceIdx: number) {
   const { polygon, y, thickness } = p.shape;
   let pts = polygon.map((v) => new Vector2(v.x, v.y));
   if (ShapeUtils.isClockWise(pts)) pts = pts.reverse();
-  const tris = ShapeUtils.triangulateShape(pts, []);
+  // holes run clockwise (their sides then face into the hole)
+  const holes = (p.shape.holes ?? []).filter((h) => h.length >= 3).map((h) => {
+    const hp = h.map((v) => new Vector2(v.x, v.y));
+    return ShapeUtils.isClockWise(hp) ? hp : hp.reverse();
+  });
+  const tris = ShapeUtils.triangulateShape(pts, holes);
+  const all = [...pts, ...holes.flat()];
   const top = y + thickness;
   // top face (plan y → world -z; CCW in plan = CCW seen from above)
   const baseTop = b.positions.length / 3;
-  for (const v of pts) { b.positions.push(v.x, top, -v.y); b.normals.push(0, 1, 0); b.uvs.push(v.x, v.y); }
+  for (const v of all) { b.positions.push(v.x, top, -v.y); b.normals.push(0, 1, 0); b.uvs.push(v.x, v.y); }
   for (const t of tris) { b.indices.push(baseTop + t[0], baseTop + t[1], baseTop + t[2]); b.triPiece.push(pieceIdx); }
   // bottom face
   const baseBot = b.positions.length / 3;
-  for (const v of pts) { b.positions.push(v.x, y, -v.y); b.normals.push(0, -1, 0); b.uvs.push(v.x, v.y); }
+  for (const v of all) { b.positions.push(v.x, y, -v.y); b.normals.push(0, -1, 0); b.uvs.push(v.x, v.y); }
   for (const t of tris) { b.indices.push(baseBot + t[0], baseBot + t[2], baseBot + t[1]); b.triPiece.push(pieceIdx); }
   // sides
   if (thickness > 0.001) {
-    for (let i = 0; i < pts.length; i++) {
-      const a = pts[i], c = pts[(i + 1) % pts.length];
-      const L = Math.hypot(c.x - a.x, c.y - a.y) || 1;
-      const n = [(c.y - a.y) / L, 0, (c.x - a.x) / L]; // outward normal of CCW edge, in world xz
-      addQuad(b, [[a.x, y, -a.y], [c.x, y, -c.y], [c.x, top, -c.y], [a.x, top, -a.y]], n, [[0, 0], [L, 0], [L, thickness], [0, thickness]], pieceIdx);
+    for (const loop of [pts, ...holes]) {
+      for (let i = 0; i < loop.length; i++) {
+        const a = loop[i], c = loop[(i + 1) % loop.length];
+        const L = Math.hypot(c.x - a.x, c.y - a.y) || 1;
+        const n = [(c.y - a.y) / L, 0, (c.x - a.x) / L]; // outward normal of CCW edge, in world xz
+        addQuad(b, [[a.x, y, -a.y], [c.x, y, -c.y], [c.x, top, -c.y], [a.x, top, -a.y]], n, [[0, 0], [L, 0], [L, thickness], [0, thickness]], pieceIdx);
+      }
     }
   }
 }
 
 export function layerOf(p: ScenePiece): MeshGroup["layer"] {
-  if (p.elementKind === "ceiling") return "ceiling";
+  // roofs and ceiling fittings go with the ceilings: cut-away views hide them together
+  if (p.elementKind === "ceiling" || p.elementKind === "roof" || p.elementKind === "light") return "ceiling";
   if (p.elementKind === "glass" || p.elementKind === "railing") return "glass";
   return "main";
 }
 
+/** Architecture that a section cut trims to the cut height; furniture, floors and the site stay whole. */
+const CUT_KINDS = new Set(["wall", "lintel", "sill", "glass", "frame", "door_leaf", "fascia", "screen", "curtain"]);
+
+/** A storey drawn as a section: its walls stop at `y` (world height), capped with the cut-line colour. */
+export type SectionCut = { levelId: string; y: number };
+
+function cutPiece(p: ScenePiece, cut?: SectionCut): ScenePiece | null {
+  if (!cut || p.levelId !== cut.levelId || p.shape.type !== "box" || !CUT_KINDS.has(p.elementKind) || p.shape.pitch) return p;
+  const { center: c, size: s } = p.shape;
+  const y0 = c.y - s.y / 2, y1 = c.y + s.y / 2;
+  if (y0 >= cut.y - 0.005) return null;
+  if (y1 <= cut.y) return p;
+  return { ...p, shape: { ...p.shape, center: { ...c, y: (y0 + cut.y) / 2 }, size: { ...s, y: cut.y - y0 } } };
+}
+
 /** Merge pieces into one buffer per (level, material, layer, inferred) so a whole unit is a handful of draw calls. */
-export function buildGroups(g: PropertySceneGraph): MeshGroup[] {
+export function buildGroups(g: PropertySceneGraph, cut?: SectionCut): MeshGroup[] {
   const groups = new Map<string, MeshGroup>();
   const group = (levelId: string, materialId: string, layer: MeshGroup["layer"], inferred: boolean) => {
     const key = `${levelId}|${materialId}|${layer}|${inferred ? 1 : 0}`;
@@ -147,10 +180,12 @@ export function buildGroups(g: PropertySceneGraph): MeshGroup[] {
     return grp;
   };
   const caps = g.materials.some((m) => m.id === CAP_MATERIAL);
-  g.pieces.forEach((p, i) => {
+  g.pieces.forEach((p0, i) => {
+    const p = cutPiece(p0, cut);
+    if (!p) return;
     const grp = group(p.levelId, p.materialId, layerOf(p), p.inferred);
     if (p.shape.type === "box" && p.shape.bevel) addChamferBox(grp.buffers, p, i);
-    else if (p.shape.type === "box") addBox(grp.buffers, p, i, caps && CAPPED.has(p.elementKind) ? group(p.levelId, CAP_MATERIAL, "main", p.inferred).buffers : undefined);
+    else if (p.shape.type === "box") addBox(grp.buffers, p, i, caps && (CAPPED.has(p.elementKind) || (p !== p0 && CUT_KINDS.has(p.elementKind))) ? group(p.levelId, CAP_MATERIAL, "main", p.inferred).buffers : undefined);
     else addPoly(grp.buffers, p, i);
   });
   return [...groups.values()].filter((grp) => grp.buffers.indices.length);

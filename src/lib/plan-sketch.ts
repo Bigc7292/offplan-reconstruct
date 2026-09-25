@@ -43,11 +43,13 @@ export type PlanSketch = {
   walls?: Array<{ a: P; b: P; kind: PlanLevelOut["walls"][number]["kind"]; thicknessM?: number }>;
   furniture?: PlanLevelOut["furniture"];
   dimensionStrings?: string[];
+  /** key plans only: the render camera marker (apex, and the middle of its far edge) */
+  cameras?: Array<{ at: P; look: P; page?: number }>;
 };
 
 const OUTDOOR = /balcony|terrace|garden|pool|deck|outdoor|bbq|lawn|court|sunken/i;
 
-export function sketchToPlan(s: PlanSketch, imgW: number, imgH: number): PlanLevelOut {
+export function sketchToPlan(s: PlanSketch, imgW: number, imgH: number): PlanLevelOut & { cameras?: Array<{ page: number | null; at: { x: number; y: number }; look: { x: number; y: number } }> } {
   const snap = 5; // px: corners closer than this are the same corner
   const pts: P[] = [];
   const snapPt = (p: P): P => {
@@ -163,6 +165,7 @@ export function sketchToPlan(s: PlanSketch, imgW: number, imgH: number): PlanLev
     walls,
     furniture: s.furniture ?? [],
     dimensionStrings: s.dimensionStrings ?? s.rooms.filter((r) => r.printed).map((r) => `${r.name} ${r.printed}`),
+    ...(s.cameras ? { cameras: s.cameras.map((c) => ({ page: c.page ?? null, at: { x: c.at[0], y: c.at[1] }, look: { x: c.look[0], y: c.look[1] } })) } : {}),
   };
 }
 

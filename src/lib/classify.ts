@@ -1,10 +1,10 @@
 // Stage 2: label every page (multi-label) and every extracted image asset.
 // Local classifier = keyword evidence from text/OCR + image signals. Claude classifier when a key is set.
 import { limiter, settle, MODEL_CONCURRENCY } from "./concurrency";
-import type { AssetKind, PageLabel, PageRecord } from "./schema";
+import type { AssetKind, PageLabel, PageRecord, SourceRecord } from "./schema";
 import { jobFile, log, readJob, updateJob, writeJobFile } from "./store";
 import { readAssetIndex, type AssetIndexEntry } from "./ingest";
-import { dHash, findPhotoRegion, imageStats, type ImageStats } from "./image-stats";
+import { dHash, findDrawingRegion, findPhotoRegion, imageStats, type ImageStats } from "./image-stats";
 import sharp from "sharp";
 import { callStructured, CLASSIFY_SYSTEM, ClassifySchema, extractorKind } from "./llm";
 
@@ -119,6 +119,32 @@ export function captionFor(p: PageRecord, bbox: [number, number, number, number]
   return best?.s;
 }
 
+export const PLAN_LABELS: readonly PageLabel[] = ["unit_plan", "typical_floor", "furniture_layout"];
+export const isPlanPage = (p: PageRecord) => p.labels.some((l) => PLAN_LABELS.includes(l));
+
+/**
+ * Pages of a plan the app found online: the search already said the file is a floor plan, so an image is a plan
+ * and a PDF's pages keep what the local classifier sees, except that a PDF with no page recognised as a plan
+ * has its drawing pages taken as plans.
+ */
+export function foundOnlineLabels(pages: PageRecord[], src: SourceRecord, stats: (p: PageRecord) => ImageStats[]) {
+  const why = `found online (${src.origin?.match.replace("_", " ")} for ${src.origin?.planFor})`;
+  const out = new Map<number, { labels: PageLabel[]; labelConfidence: number; labelReason: string }>();
+  const mine = pages.filter((p) => p.sourceId === src.id);
+  for (const p of mine) {
+    if (src.kind === "image") { out.set(p.n, { labels: ["unit_plan"], labelConfidence: 0.7, labelReason: why }); continue; }
+    const r = localClassify(p, p === mine[0], stats(p));
+    out.set(p.n, { labels: r.labels, labelConfidence: r.confidence, labelReason: `${why}; local: ${r.reason}` });
+  }
+  if (src.kind === "pdf" && ![...out.values()].some((x) => x.labels.some((l) => PLAN_LABELS.includes(l)))) {
+    for (const p of mine) {
+      const st = p.stats ?? stats(p)[0];
+      if (st && st.whiteRatio > 0.45 && st.saturation < 0.15) out.set(p.n, { labels: ["unit_plan"], labelConfidence: 0.5, labelReason: `${why}; drawing page` });
+    }
+  }
+  return out;
+}
+
 export async function classifyAll(jobId: string) {
   const job = (await readJob(jobId))!;
   const assets = await readAssetIndex(jobId);
@@ -126,10 +152,15 @@ export async function classifyAll(jobId: string) {
   const firstPages = new Set(job.sources.map((s) => job.pages.find((p) => p.sourceId === s.id)?.n));
   const assetStats = new Map<string, ImageStats>();
   for (const a of assets) assetStats.set(a.id, await imageStats(jobFile(jobId, a.path)));
+  // pages of plans found online are labelled from the search, not sent to the model again
+  const found = new Map<number, { labels: PageLabel[]; labelConfidence: number; labelReason: string }>();
+  for (const src of job.sources.filter((s) => s.origin)) {
+    for (const [n, v] of foundOnlineLabels(job.pages, src, (p) => assets.filter((a) => a.page === p.n && a.origin === "pdf_crop").map((a) => assetStats.get(a.id)!))) found.set(n, v);
+  }
 
   // start every page's model call up front, a few at a time; results are applied in page order
   const run = limiter(MODEL_CONCURRENCY);
-  const modelOut = new Map(useClaude ? job.pages.map((p) => [p.n, settle(run(() => callStructured(jobId, {
+  const modelOut = new Map(useClaude ? job.pages.filter((p) => !found.has(p.n)).map((p) => [p.n, settle(run(() => callStructured(jobId, {
     task: `classify page ${p.n}`, system: CLASSIFY_SYSTEM, schema: ClassifySchema, schemaName: "PageClassification",
     prompt: `Page ${p.n}. Extracted text (${p.textSource}):\n"""\n${p.text.slice(0, 6000)}\n"""`,
     images: [jobFile(jobId, p.image)],
@@ -138,7 +169,9 @@ export async function classifyAll(jobId: string) {
   for (const p of job.pages) {
     const mine = assets.filter((a) => a.page === p.n && a.origin === "pdf_crop");
     p.caption = p.caption ?? extractCaption(p);
-    if (useClaude) {
+    if (found.has(p.n)) {
+      Object.assign(p, found.get(p.n));
+    } else if (useClaude) {
       try {
         const r = await modelOut.get(p.n)!;
         if (!r.ok) throw r.error;
@@ -157,30 +190,47 @@ export async function classifyAll(jobId: string) {
     await log(jobId, "classify", `Page ${p.n} → ${p.labels.join(", ")} (${Math.round(p.labelConfidence * 100)}%)${p.caption ? ` · caption "${p.caption}"` : ""}`);
   }
 
-  // scanned render pages carry no embedded crops: cut the render out of the page image
-  for (const p of job.pages) {
-    if (!p.labels.some((l) => l === "cgi_interior" || l === "cgi_exterior")) continue;
-    if (assets.some((a) => a.page === p.n && a.origin === "pdf_crop")) continue;
+  // scanned render pages carry no embedded crops: cut the render, and the key plan printed beside it, out of the page image
+  const cut = async (p: PageRecord, bb: [number, number, number, number], what: "render" | "key_plan") => {
     const file = jobFile(jobId, p.image);
-    const bb = await findPhotoRegion(file);
-    if (!bb) continue;
     const left = Math.round(bb[0] * p.widthPx), top = Math.round(bb[1] * p.heightPx);
     const width = Math.min(p.widthPx - left, Math.round((bb[2] - bb[0]) * p.widthPx)), height = Math.min(p.heightPx - top, Math.round((bb[3] - bb[1]) * p.heightPx));
     const crop = await sharp(file).extract({ left, top, width, height }).png().toBuffer();
     const hash = await dHash(crop);
     const id = `a${p.n}-${hash.slice(0, 8)}`;
     await writeJobFile(jobId, `assets/${id}.png`, crop);
-    const entry: AssetIndexEntry = { id, path: `assets/${id}.png`, page: p.n, bbox: bb, hash, w: width, h: height, sourceId: p.sourceId, origin: "pdf_crop" };
+    const entry: AssetIndexEntry = { id, path: `assets/${id}.png`, page: p.n, bbox: bb, hash, w: width, h: height, sourceId: p.sourceId, origin: "pdf_crop", cut: what };
     assets.push(entry);
     assetStats.set(id, await imageStats(crop));
-    await log(jobId, "classify", `Page ${p.n}: cut render out of scanned page (${Math.round((bb[2] - bb[0]) * 100)}% × ${Math.round((bb[3] - bb[1]) * 100)}% of page).`);
+    await log(jobId, "classify", `Page ${p.n}: cut ${what === "render" ? "render" : "key plan"} out of scanned page (${Math.round((bb[2] - bb[0]) * 100)}% × ${Math.round((bb[3] - bb[1]) * 100)}% of page).`);
+    return entry;
+  };
+  for (const p of job.pages) {
+    if (!p.labels.some((l) => l === "cgi_interior" || l === "cgi_exterior")) continue;
+    const scanned = p.textSource === "ocr" || p.textSource === "none";
+    // crops of a scanned page were cut here (older runs did not mark them); a born-digital page's crops are its embedded images
+    const crops = assets.filter((a) => a.page === p.n && a.origin === "pdf_crop").map((a) => (!a.cut && scanned ? { ...a, cut: "render" as const } : a));
+    if (crops.some((a) => !a.cut)) continue;
+    let render = crops.find((a) => a.cut === "render");
+    if (!render) {
+      const bb = await findPhotoRegion(jobFile(jobId, p.image));
+      if (!bb) continue;
+      render = await cut(p, bb, "render");
+    }
+    if (!crops.some((a) => a.cut === "key_plan")) {
+      const kb = await findDrawingRegion(jobFile(jobId, p.image), render.bbox);
+      if (kb) await cut(p, kb, "key_plan");
+    }
   }
 
   // label assets from their page + own pixels; attach captions
   const labelled = assets.map((a) => {
     const p = job.pages.find((x) => x.n === a.page)!;
     const st = assetStats.get(a.id)!;
-    const kind = a.origin === "pdf_crop" ? assetKindFor(p, a, st) : assetKindFor({ ...p, labels: p.labels }, { ...a, bbox: [0, 0, 1, 1] }, st);
+    const pageCgi = p.labels.find((l): l is "cgi_interior" | "cgi_exterior" => l === "cgi_interior" || l === "cgi_exterior");
+    const kind: AssetKind = a.cut === "key_plan" ? "key_plan"
+      : (a.cut === "render" || (!a.cut && a.origin === "pdf_crop" && (p.textSource === "ocr" || p.textSource === "none"))) && pageCgi ? pageCgi
+      : a.origin === "pdf_crop" ? assetKindFor(p, a, st) : assetKindFor({ ...p, labels: p.labels }, { ...a, bbox: [0, 0, 1, 1] }, st);
     const caption = (a.origin === "pdf_crop" ? captionFor(p, a.bbox) ?? (p.textSource === "ocr" ? p.caption : undefined) : a.alt ?? p.caption);
     return { ...a, kind, caption, stats: st };
   });

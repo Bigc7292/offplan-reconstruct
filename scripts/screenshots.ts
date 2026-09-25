@@ -79,7 +79,9 @@ try {
     const thumbs = page.locator("[data-testid=render-gallery] button[title]");
     const n = await thumbs.count();
     for (let i = 1; i < n; i += Math.max(1, Math.floor(n / 4))) {
-      await thumbs.nth(i).click();
+      // an open render covers the gallery: close it before picking the next one
+      await page.keyboard.press("Escape").catch(() => {});
+      await thumbs.nth(i).click({ force: true, timeout: 10_000 }).catch(() => {});
       await sleep(1500);
       await shot(page, `share-render-${i}`);
     }

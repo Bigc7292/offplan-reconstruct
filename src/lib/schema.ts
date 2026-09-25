@@ -47,10 +47,19 @@ export const WallSchema = z.object({
 });
 export type Wall = z.infer<typeof WallSchema>;
 
+/** Furniture the plan reader can name; the builder draws each as a recognisable, generic piece. */
+export const PLAN_FURNITURE_KINDS = [
+  "bed_double", "bed_single", "sofa", "dining", "kitchen_run", "island", "wardrobe", "bath", "wc", "vanity", "desk", "armchair",
+  "coffee_table", "side_table", "rug", "media_unit", "ottoman", "lounger", "bench", "planter", "car", "shower", "bbq", "other",
+] as const;
+/** ...plus pieces only the builder adds when it dresses a room (always marked illustrative). */
+export const FURNITURE_KINDS = [...PLAN_FURNITURE_KINDS, "stool", "floor_lamp", "mirror", "dresser"] as const;
+export type FurnitureKind = (typeof FURNITURE_KINDS)[number];
+
 export const FurnitureSchema = z.object({
   // extension: FF&E proxy, only emitted when the brochure shows a furniture layout
   id: z.string(),
-  kind: z.enum(["bed_double", "bed_single", "sofa", "dining", "kitchen_run", "island", "wardrobe", "bath", "wc", "vanity", "desk", "armchair", "other"]),
+  kind: z.enum(FURNITURE_KINDS),
   center: Vec2Schema,
   sizeM: z.object({ w: z.number(), d: z.number(), h: z.number() }),
   rotationDeg: z.number(),
@@ -65,6 +74,7 @@ export const RoomSchema = z.object({
   program: z.string(), // bedroom | living | kitchen | bath | balcony | circulation | storage | amenity | other
   polygon: z.array(Vec2Schema), // closed (last point implicitly joins first), metres
   areaM2: z.number().optional(), // from docs if present, else computed
+  printedDims: z.string().optional(), // extension: the width × length printed on the plan, e.g. "6.9 X 4.8"
   ceilingHeightM: z.number().optional(),
   levelId: z.string(),
   adjacentRoomIds: z.array(z.string()),
@@ -86,6 +96,25 @@ export const PlanCalibrationSchema = z.object({
 });
 export type PlanCalibration = z.infer<typeof PlanCalibrationSchema>;
 
+export const SiteSchema = z.object({
+  plot: z.array(Vec2Schema).optional(), // the plot boundary
+  lawn: z.array(z.array(Vec2Schema)).default([]),
+  planting: z.array(z.array(Vec2Schema)).default([]), // beds, hedges and trees
+  paving: z.array(z.array(Vec2Schema)).default([]),
+  driveway: z.array(z.array(Vec2Schema)).default([]),
+  gate: Vec2Schema.optional(), // where the plot is entered from the street
+  evidence: z.array(EvidenceSchema),
+});
+export type Site = z.infer<typeof SiteSchema>;
+
+export const StairSchema = z.object({
+  id: z.string(),
+  path: z.array(Vec2Schema), // walking line, foot first
+  widthM: z.number().positive(),
+  evidence: z.array(EvidenceSchema),
+});
+export type Stair = z.infer<typeof StairSchema>;
+
 export const LevelSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -96,11 +125,36 @@ export const LevelSchema = z.object({
   furniture: z.array(FurnitureSchema).optional(), // extension
   plan: PlanCalibrationSchema.optional(), // extension
   unitTypeId: z.string().optional(), // extension: which unit type this level belongs to
+  /**
+   * extension: "key_plans" when the level was traced from the small key plans printed beside renders (no floor
+   * plan exists): each key plan is a separate group of rooms, set side by side, positions on the floor unknown.
+   */
+  layout: z.enum(["plan", "key_plans"]).optional(),
+  /** extension: a note on how the level was read (e.g. the brochure's own label for it was wrong) */
+  note: z.string().optional(),
+  /** extension: the plot and its hard and soft landscaping, as drawn around the house on this level's plan */
+  site: SiteSchema.optional(),
+  /** extension: stairs drawn on the plan, each by its walking line from its foot on this level to the level above */
+  stairs: z.array(StairSchema).optional(),
+  /** extension: where a brochure render was taken from, read off the camera marker on its key plan */
+  renderViews: z.array(z.object({
+    page: z.number(),
+    caption: z.string().optional(),
+    renderAssetId: z.string().optional(),
+    at: Vec2Schema,
+    look: Vec2Schema,
+  })).optional(),
 });
 export type Level = z.infer<typeof LevelSchema>;
 
 export const SurfaceSchema = z.enum(["floor", "wall", "ceiling", "joinery", "counter", "facade", "glass"]);
 export type Surface = z.infer<typeof SurfaceSchema>;
+
+export const MATERIAL_ROLES = [
+  "facade_wall", "slab_edge", "soffit", "window_frame", "screen", "pergola", "balustrade", "roof",
+  "paving", "lawn", "planting", "boundary_wall", "gate", "pool_coping", "pool_water", "driveway",
+] as const;
+export type MaterialRole = (typeof MATERIAL_ROLES)[number];
 
 export const MaterialSchema = z.object({
   id: z.string(),
@@ -116,6 +170,8 @@ export const MaterialSchema = z.object({
   roomIds: z.array(z.string()).optional(),
   programs: z.array(z.string()).optional(),
   textureAssetId: z.string().optional(), // CGI crop used as a texture when the mapping is reliable
+  /** extension: what an exterior finish is for, read off the exterior renders */
+  role: z.enum(MATERIAL_ROLES).optional(),
 });
 export type Material = z.infer<typeof MaterialSchema>;
 
@@ -151,6 +207,16 @@ export type UnitType = z.infer<typeof UnitTypeSchema>;
 export const FactSchema = z.object({ key: z.string(), value: z.string(), evidence: z.array(EvidenceSchema) });
 export type Fact = z.infer<typeof FactSchema>;
 
+export const ExteriorSchema = z.object({
+  slabEdges: z.enum(["none", "thin", "deep"]).optional(), // floor and roof slabs showing as bands on the facade
+  overhangM: z.number().optional(), // how far slabs and roofs project past the walls
+  screensOn: z.array(z.string()).default([]), // names of rooms whose outside walls carry a slatted screen
+  pergola: z.boolean().optional(), // a slatted pergola over the roof terrace
+  storeyHeightM: z.number().optional(), // floor-to-ceiling, estimated from people and doors in the renders
+  evidence: z.array(EvidenceSchema),
+});
+export type Exterior = z.infer<typeof ExteriorSchema>;
+
 export const PropertyDossierSchema = z.object({
   jobId: z.string(),
   projectName: z.string().optional(),
@@ -172,6 +238,8 @@ export const PropertyDossierSchema = z.object({
     hasFinishSchedule: z.boolean(),
   }),
   // extensions
+  /** how the building looks from outside, read off the exterior renders of this property */
+  exterior: ExteriorSchema.optional(),
   selectedUnitTypeId: z.string().optional(),
   northDeg: z.number().optional(), // plan-space angle of north, degrees clockwise from +y
   demo: z.boolean().optional(),
@@ -218,6 +286,18 @@ export const PageRecordSchema = z.object({
 });
 export type PageRecord = z.infer<typeof PageRecordSchema>;
 
+/** Where a source came from when the app found it itself (a floor plan searched for online). */
+export const SourceOriginSchema = z.object({
+  kind: z.literal("web-search"),
+  foundBy: z.string(), // "Claude Code web search" | "automatic web search"
+  queries: z.array(z.string()),
+  pageUrl: z.string(), // the page or file the search returned
+  planFor: z.string(), // unit type / building the plan belongs to, as its source names it
+  match: z.enum(["exact", "same_type", "unverified"]),
+  evidence: z.string(),
+});
+export type SourceOrigin = z.infer<typeof SourceOriginSchema>;
+
 export const SourceRecordSchema = z.object({
   id: z.string(), // sha256 prefix
   kind: z.enum(["pdf", "url", "image", "demo"]),
@@ -230,8 +310,30 @@ export const SourceRecordSchema = z.object({
   meta: z.record(z.string(), z.string()).optional(),
   status: z.enum(["ok", "blocked", "error"]).default("ok"),
   error: z.string().optional(),
+  origin: SourceOriginSchema.optional(),
 });
 export type SourceRecord = z.infer<typeof SourceRecordSchema>;
+
+/** The search for floor plans online, run when no source contains a plan. */
+export const PlanSearchSchema = z.object({
+  at: z.string(),
+  status: z.enum(["waiting", "found", "none", "failed"]),
+  foundBy: z.string(),
+  queries: z.array(z.string()),
+  identified: z.string().optional(),
+  candidates: z.array(z.object({
+    url: z.string(),
+    title: z.string(),
+    planFor: z.string(),
+    levels: z.array(z.string()).default([]),
+    match: z.enum(["exact", "same_type", "different", "unverified"]),
+    evidence: z.string(),
+    used: z.boolean(),
+    error: z.string().optional(),
+  })),
+  notes: z.string().optional(),
+});
+export type PlanSearch = z.infer<typeof PlanSearchSchema>;
 
 export const STAGES = ["create", "ingest", "classify", "extract", "review", "reconstruct", "export"] as const;
 export type StageName = (typeof STAGES)[number];
@@ -267,16 +369,25 @@ export const JobSchema = z.object({
   sources: z.array(SourceRecordSchema),
   pages: z.array(PageRecordSchema),
   demo: z.boolean().optional(),
+  planSearch: PlanSearchSchema.optional(),
 });
 export type Job = z.infer<typeof JobSchema>;
 
 // ───────────────────────── scene graph (builder output) ─────────────────────────
 
-export type BoxShape = { type: "box"; center: Vec3; size: Vec3; rotY: number; /** chamfer on every edge, metres (soft furniture) */ bevel?: number };
-export type PolyShape = { type: "poly"; polygon: Vec2[]; y: number; thickness: number };
+export type BoxShape = {
+  type: "box"; center: Vec3; size: Vec3; rotY: number;
+  /** chamfer on every edge, metres (soft furniture) */
+  bevel?: number;
+  /** tilt about the box's own x axis, radians, applied before rotY (ramps, stair soffits, balustrades) */
+  pitch?: number;
+};
+export type PolyShape = { type: "poly"; polygon: Vec2[]; y: number; thickness: number; holes?: Vec2[][] };
 export type ElementKind =
   | "wall" | "lintel" | "sill" | "glass" | "door_leaf" | "frame" | "floor" | "ceiling"
-  | "railing" | "handrail" | "furniture" | "slab";
+  | "railing" | "handrail" | "furniture" | "slab"
+  // extension: structure and site the builder adds around what the plans draw
+  | "roof" | "fascia" | "screen" | "stair" | "pool" | "site" | "planting" | "vehicle" | "light" | "curtain";
 
 export type ScenePiece = {
   id: string;
@@ -297,6 +408,9 @@ export type SceneMaterial = {
   opacity: number;
   textureAssetPath?: string;
   inferred: boolean;
+  /** light fittings glow */
+  emissive?: string;
+  emissiveIntensity?: number;
 };
 
 export type SceneRoom = {

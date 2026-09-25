@@ -104,7 +104,8 @@ export async function findPhotoRegion(input: Buffer | string): Promise<[number, 
     const r = data[i * 3], g = data[i * 3 + 1], b = data[i * 3 + 2];
     const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
     const L = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    photo[i] = L > 228 && (mx - mn) < 18 ? 0 : 1;
+    // paper is near pure white; a render's brightest areas (sunlit curtains, white walls) are still toned
+    photo[i] = L > 244 && (mx - mn) < 12 ? 0 : 1;
   }
   const longestRun = (vals: number[], thr: number) => {
     let best: [number, number] = [0, -1], s = -1;
@@ -122,4 +123,71 @@ export async function findPhotoRegion(input: Buffer | string): Promise<[number, 
   const [y0, y1] = longestRun(rowFrac, 0.6);
   if (y1 - y0 < H * 0.15) return null;
   return [x0 / W, y0 / H, (x1 + 1) / W, (y1 + 1) / H];
+}
+
+/**
+ * Largest line drawing on a scanned page outside `exclude` (the render): the key plan printed beside a render.
+ * Returns a page-normalised bbox, or null when there is no drawing big enough to be a plan.
+ */
+export async function findDrawingRegion(input: Buffer | string, exclude?: [number, number, number, number]): Promise<[number, number, number, number] | null> {
+  const W = 320;
+  const { data, info } = await sharp(input).resize(W, null).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const H = info.height;
+  const ink = new Uint8Array(W * H);
+  const tone = new Uint8Array(W * H); // anything but paper white: renders are toned edge to edge, plans are white between lines
+  const [ex0, ey0, ex1, ey1] = exclude ? [exclude[0] * W - 3, exclude[1] * H - 3, exclude[2] * W + 3, exclude[3] * H + 3] : [0, 0, -1, -1];
+  // the caption line under the render belongs to the render, not to a drawing
+  const capY1 = ey1 + H * 0.06;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (x >= ex0 && x <= ex1 && y >= ey0 && y <= capY1) continue;
+      const i = y * W + x, r = data[i * 3], g = data[i * 3 + 1], b = data[i * 3 + 2];
+      const L = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      if (L < 225 || Math.max(r, g, b) - Math.min(r, g, b) > 30) ink[i] = 1;
+      if (L < 246 || Math.max(r, g, b) - Math.min(r, g, b) > 12) tone[i] = 1;
+    }
+  }
+  // join the lines of one drawing: dilate, then take connected blobs
+  const R = 4;
+  const grown = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (!ink[y * W + x]) continue;
+    for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+      const X = x + dx, Y = y + dy;
+      if (X >= 0 && Y >= 0 && X < W && Y < H) grown[Y * W + X] = 1;
+    }
+  }
+  const seen = new Uint8Array(W * H);
+  let best: { bb: [number, number, number, number]; score: number } | null = null;
+  for (let s = 0; s < W * H; s++) {
+    if (!grown[s] || seen[s]) continue;
+    const stack = [s];
+    seen[s] = 1;
+    let x0 = W, y0 = H, x1 = 0, y1 = 0, n = 0, inkN = 0;
+    while (stack.length) {
+      const i = stack.pop()!, x = i % W, y = (i - x) / W;
+      n++;
+      if (ink[i]) inkN++;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      for (const j of [i - 1, i + 1, i - W, i + W]) {
+        if (j < 0 || j >= W * H || seen[j] || !grown[j]) continue;
+        if ((j === i - 1 && x === 0) || (j === i + 1 && x === W - 1)) continue;
+        seen[j] = 1;
+        stack.push(j);
+      }
+    }
+    // a strip of the render the photo finder missed is dense from top to bottom: trim it off either side
+    const dense = (x: number) => { let c = 0; for (let y = y0; y <= y1; y++) c += tone[y * W + x]; return c / (y1 - y0 + 1) > 0.6; };
+    const blank = (x: number) => { for (let y = y0; y <= y1; y++) if (ink[y * W + x]) return false; return true; };
+    if (dense(x0)) { while (x0 < x1 && dense(x0)) x0++; while (x0 < x1 && blank(x0)) x0++; }
+    if (dense(x1)) { while (x1 > x0 && dense(x1)) x1--; while (x1 > x0 && blank(x1)) x1--; }
+    const w = x1 - x0 + 1, h = y1 - y0 + 1;
+    // a plan is a sizeable block with sparse ink (lines on white); logos and captions are small or flat
+    if (w < W * 0.08 || h < H * 0.12) continue;
+    const density = inkN / (w * h);
+    if (density > 0.6) continue;
+    const score = w * h;
+    if (!best || score > best.score) best = { bb: [Math.max(0, x0 - 2) / W, Math.max(0, y0 - 2) / H, Math.min(W, x1 + 3) / W, Math.min(H, y1 + 3) / H], score };
+  }
+  return best?.bb ?? null;
 }
