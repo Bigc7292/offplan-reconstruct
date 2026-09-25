@@ -83,14 +83,14 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
         <Brand small />
         <div className="min-w-0">
           <div className="truncate text-stone-100" data-testid="model-title">{scene.title}</div>
-          <div className="text-[11px] text-stone-500">{scene.stats.rooms} rooms · {scene.stats.walls} walls · {scene.stats.openings} openings · {scene.stats.inferredPieces} inferred pieces · model {scene.dossierHash}</div>
+          {share ? <div className="text-[11px] text-stone-500">{scene.levels.length} floors · {scene.stats.rooms} rooms · 3D model from the brochure</div> : <div className="text-[11px] text-stone-500">{scene.stats.rooms} rooms · {scene.stats.walls} walls · {scene.stats.openings} openings · {scene.stats.inferredPieces} inferred pieces · model {scene.dossierHash}</div>}
         </div>
         {scene.demo && <span className="chip chip-inferred">DEMO</span>}
         <div className="ml-auto flex items-center gap-2 text-xs">
           {!share && <Link className="btn" href={`/jobs/${jobId}`}>Back to review</Link>}
           <button className="btn" onClick={screenshot}>Screenshot</button>
-          <button className="btn" onClick={() => exportGlb(!showInferred)} disabled={!!exporting} data-testid="export-glb">{exporting ? "Exporting…" : showInferred ? "Export GLB" : "Export GLB (attested only)"}</button>
-          <a className="btn" href={`/api/jobs/${jobId}/export?format=json`}>Scene JSON</a>
+          {!share && <button className="btn" onClick={() => exportGlb(!showInferred)} disabled={!!exporting} data-testid="export-glb">{exporting ? "Exporting…" : showInferred ? "Export GLB" : "Export GLB (attested only)"}</button>}
+          {!share && <a className="btn" href={`/api/jobs/${jobId}/export?format=json`}>Scene JSON</a>}
           {!share && (
             <button className="btn btn-gold" onClick={async () => { try { await navigator.clipboard.writeText(shareUrl); } catch { /* insecure context */ } setCopied(true); setTimeout(() => setCopied(false), 1500); }}>
               {copied ? "Link copied" : "Share link"}
@@ -185,7 +185,7 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
 
         <aside className="border-l border-stone-800 p-3 space-y-3 overflow-auto scroll-thin">
           <EvidenceDrawer info={info} jobId={jobId} onClose={() => { setPick(null); select(null); }} />
-          <MaterialLegend scene={scene} showInferred={showInferred} />
+          <MaterialLegend scene={scene} showInferred={showInferred} share={share} />
           {scene.warnings.length > 0 && (
             <div className="panel p-3 text-xs space-y-1">
               <div className="label">Warnings</div>
@@ -198,11 +198,13 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
   );
 }
 
-function MaterialLegend({ scene, showInferred }: { scene: PropertySceneGraph; showInferred: boolean }) {
+function MaterialLegend({ scene, showInferred, share }: { scene: PropertySceneGraph; showInferred: boolean; share?: boolean }) {
   const used = useMemo(() => {
-    const ids = new Set(scene.pieces.filter((p) => showInferred || !p.inferred).map((p) => p.materialId));
+    // a buyer sees the finishes of the house, not the staging (cars, bay lines, light fittings, flames)
+    const staging = (p: PropertySceneGraph["pieces"][number]) => share && (p.elementKind === "vehicle" || p.elementKind === "light" || /bayline|fire|light/.test(p.materialId));
+    const ids = new Set(scene.pieces.filter((p) => (showInferred || !p.inferred) && !staging(p)).map((p) => p.materialId));
     return scene.materials.filter((m) => ids.has(m.id));
-  }, [scene, showInferred]);
+  }, [scene, showInferred, share]);
   return (
     <div className="panel p-3 space-y-1.5">
       <div className="label">Finishes in the model</div>

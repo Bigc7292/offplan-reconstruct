@@ -101,7 +101,7 @@ export const FALLBACKS: Record<string, SceneMaterial> = Object.fromEntries([
   fb("auto:outdoor", "Outdoor cushion (illustrative)", "#e8e2d6", 0.95),
   fb("auto:screen", "Timber slat screen (assumed)", "#9a7350", 0.65),
   fb("auto:pergola", "Pergola (assumed)", "#3a3633", 0.55, 0.3),
-  fb("auto:light", "Light fitting (illustrative)", "#fff3dc", 0.5, 0, 1, { emissive: "#ffd9a0", emissiveIntensity: 2.2 }),
+  fb("auto:light", "Light fitting (illustrative)", "#fff3dc", 0.5, 0, 1, { emissive: "#ffd9a0", emissiveIntensity: 1.1 }),
   fb("auto:fire", "Fire pit flame (illustrative)", "#ff9a3c", 0.5, 0, 1, { emissive: "#ff7a1c", emissiveIntensity: 3 }),
 ]);
 

@@ -349,7 +349,7 @@ export function emitParking(e: Emit, s: Storey, r: Room, target: number | undefi
       used.n++;
       line(P(a0, row.off), P(a0, row.off + 5));
       line(P(a1, row.off), P(a1, row.off + 5));
-      if (hash01(`${r.id}-bay${used.n}`) < 0.62) {
+      if (hash01(`${r.id}-bay${used.n}`) < 0.8) {
         const c = P(a0 + 1.25, row.off + 2.5);
         car(c.x, c.y, alongX ? 0 : 90, used.n);
       }
