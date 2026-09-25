@@ -10,6 +10,7 @@ import type { WalkPose } from "@/scene/WalkControls";
 import { EvidenceDrawer, describeElement } from "./Evidence";
 import { Brand } from "./Brand";
 import { fileUrl, useStudio } from "@/lib/client-store";
+import { RenderGallery, WalkthroughVideo, useRenders, useWalkthroughVideo } from "./RenderGallery";
 
 type Props = { jobId: string; scene: PropertySceneGraph; dossier: PropertyDossier | null; sources: SourceRecord[]; share?: boolean };
 
@@ -18,8 +19,14 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
   const selection = useStudio((s) => s.selection);
   const pulse = useStudio((s) => s.pulse);
   const [mode, setMode] = useState<ViewMode>("dollhouse");
+  const renders = useRenders(jobId, scene.dossierHash);
+  // buyers opening a shared link land on the rendered views first; the 3D model is one click away
+  const [gallery, setGallery] = useState<boolean | null>(null);
+  const showGallery = !!renders && (gallery ?? !!share);
+  const video = useWalkthroughVideo(jobId);
+  const [showVideo, setShowVideo] = useState(false);
   const [showInferred, setShowInferred] = useState(true);
-  const [levelId, setLevelId] = useState<string | "all">(scene.levels.length > 1 ? "all" : scene.levels[0]?.id ?? "all");
+  const [levelId, setLevelId] = useState<string | "all">(scene.spawn.levelId || scene.levels[0]?.id || "all");
   const [measuring, setMeasuring] = useState(false);
   const [mood, setMood] = useState<"day" | "dusk">("day");
   const [overlayOn, setOverlayOn] = useState(false);
@@ -45,7 +52,8 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
 
   const jumpTo = (roomId: string) => {
     const r = scene.rooms.find((x) => x.id === roomId);
-    if (r && levelId !== "all" && r.levelId !== levelId) setLevelId(r.levelId);
+    // walking always happens on the room's own floor; in dollhouse, follow the room unless showing every floor
+    if (r && (mode === "walk" || levelId !== "all") && r.levelId !== levelId) setLevelId(r.levelId);
     setJump((j) => ({ roomId, n: (j?.n ?? 0) + 1 }));
     setPick(null);
     select({ id: roomId, kind: "room", levelId: r?.levelId }, true);
@@ -75,14 +83,14 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
         <Brand small />
         <div className="min-w-0">
           <div className="truncate text-stone-100" data-testid="model-title">{scene.title}</div>
-          <div className="text-[11px] text-stone-500">{scene.stats.rooms} rooms · {scene.stats.walls} walls · {scene.stats.openings} openings · {scene.stats.inferredPieces} inferred pieces · model {scene.dossierHash}</div>
+          {share ? <div className="text-[11px] text-stone-500">{scene.levels.length} floors · {scene.stats.rooms} rooms · 3D model from the brochure</div> : <div className="text-[11px] text-stone-500">{scene.stats.rooms} rooms · {scene.stats.walls} walls · {scene.stats.openings} openings · {scene.stats.inferredPieces} inferred pieces · model {scene.dossierHash}</div>}
         </div>
         {scene.demo && <span className="chip chip-inferred">DEMO</span>}
         <div className="ml-auto flex items-center gap-2 text-xs">
           {!share && <Link className="btn" href={`/jobs/${jobId}`}>Back to review</Link>}
           <button className="btn" onClick={screenshot}>Screenshot</button>
-          <button className="btn" onClick={() => exportGlb(!showInferred)} disabled={!!exporting} data-testid="export-glb">{exporting ? "Exporting…" : showInferred ? "Export GLB" : "Export GLB (attested only)"}</button>
-          <a className="btn" href={`/api/jobs/${jobId}/export?format=json`}>Scene JSON</a>
+          {!share && <button className="btn" onClick={() => exportGlb(!showInferred)} disabled={!!exporting} data-testid="export-glb">{exporting ? "Exporting…" : showInferred ? "Export GLB" : "Export GLB (attested only)"}</button>}
+          {!share && <a className="btn" href={`/api/jobs/${jobId}/export?format=json`}>Scene JSON</a>}
           {!share && (
             <button className="btn btn-gold" onClick={async () => { try { await navigator.clipboard.writeText(shareUrl); } catch { /* insecure context */ } setCopied(true); setTimeout(() => setCopied(false), 1500); }}>
               {copied ? "Link copied" : "Share link"}
@@ -97,24 +105,33 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
             <div className="label mb-1.5">View</div>
             <div className="grid grid-cols-3 gap-1">
               {(["dollhouse", "walk", "plan"] as const).map((m) => (
-                <button key={m} data-testid={`mode-${m}`} onClick={() => { setMode(m); setMeasuring(false); }} className={`btn !px-1 !text-xs capitalize ${mode === m ? "btn-gold" : ""}`}>{m}</button>
+                <button key={m} data-testid={`mode-${m}`} onClick={() => { setMode(m); setMeasuring(false); setGallery(false); setShowVideo(false); }} className={`btn !px-1 !text-xs capitalize ${mode === m && !showGallery ? "btn-gold" : ""}`}>{m}</button>
               ))}
             </div>
+            {renders && (
+              <button data-testid="mode-renders" onClick={() => { setGallery(true); setShowVideo(false); }} className={`btn w-full mt-1 !text-xs ${showGallery ? "btn-gold" : ""}`}>Rendered views ({renders.shots.length})</button>
+            )}
+            {video ? (
+              <button data-testid="mode-video" onClick={() => setShowVideo(true)} className={`btn w-full mt-1 !text-xs ${showVideo ? "btn-gold" : ""}`}>▶ Walkthrough video</button>
+            ) : (
+              <Link data-testid="mode-tour" href={`/tour/${jobId}`} className="btn w-full mt-1 !text-xs">▶ Guided tour</Link>
+            )}
           </div>
           {scene.levels.length > 1 && (
             <div>
               <div className="label mb-1.5">Levels</div>
               <div className="flex flex-wrap gap-1">
                 {mode !== "walk" && <button className={`chip ${levelId === "all" ? "chip-gold" : ""}`} onClick={() => setLevelId("all")}>All</button>}
-                {scene.levels.map((l) => <button key={l.id} className={`chip ${levelId === l.id ? "chip-gold" : ""}`} onClick={() => setLevelId(l.id)}>{l.name}</button>)}
+                {scene.levels.map((l) => <button key={l.id} data-testid="level-chip" className={`chip ${levelId === l.id ? "chip-gold" : ""}`} onClick={() => setLevelId(l.id)}>{l.name}</button>)}
               </div>
             </div>
           )}
           <div>
             <div className="label mb-1.5">Rooms</div>
             <ul className="space-y-0.5" data-testid="room-list">
-              {rooms.map((r) => (
+              {rooms.map((r, i) => (
                 <li key={r.id}>
+                  {levelId === "all" && r.levelId !== rooms[i - 1]?.levelId && <div className="label mt-2 mb-0.5 px-2 text-stone-500">{scene.levels.find((l) => l.id === r.levelId)?.name}</div>}
                   <button onClick={() => jumpTo(r.id)} data-room={r.name}
                     className={`w-full flex justify-between rounded px-2 py-1 text-left text-xs ${selection?.id === r.id ? "bg-champagne-400/15 text-champagne-300" : pose?.roomId === r.id ? "bg-stone-800 text-stone-100" : "text-stone-300 hover:bg-stone-800/60"} ${r.inferred ? "border border-dashed border-inferred/50" : ""}`}>
                     <span className="truncate">{r.name}</span><span className="text-stone-500">{r.areaM2.toFixed(1)}</span>
@@ -142,6 +159,8 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
         </aside>
 
         <section className="relative min-h-0" data-testid="viewer">
+          {showVideo && video && <WalkthroughVideo url={video} poster={fileUrl(jobId, "exports/walkthrough-poster.jpg")} onClose={() => setShowVideo(false)} />}
+          {showGallery && renders && <RenderGallery jobId={jobId} index={renders} onOpenRoom={(id) => { setGallery(false); setMode("walk"); jumpTo(id); }} />}
           <Viewer3D scene={scene} jobId={jobId} mode={mode} showInferred={showInferred} levelId={mode === "walk" ? activeLevel : levelId}
             selectedId={selection?.id ?? null} pulseKey={pulse} jumpTo={jump} measuring={measuring} overlay={overlay} mood={mood} watermark
             canvasRef={canvas} onAzimuth={setAzimuth} onPose={setPose} onLockChange={setLocked}
@@ -166,7 +185,7 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
 
         <aside className="border-l border-stone-800 p-3 space-y-3 overflow-auto scroll-thin">
           <EvidenceDrawer info={info} jobId={jobId} onClose={() => { setPick(null); select(null); }} />
-          <MaterialLegend scene={scene} showInferred={showInferred} />
+          <MaterialLegend scene={scene} showInferred={showInferred} share={share} />
           {scene.warnings.length > 0 && (
             <div className="panel p-3 text-xs space-y-1">
               <div className="label">Warnings</div>
@@ -179,11 +198,13 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
   );
 }
 
-function MaterialLegend({ scene, showInferred }: { scene: PropertySceneGraph; showInferred: boolean }) {
+function MaterialLegend({ scene, showInferred, share }: { scene: PropertySceneGraph; showInferred: boolean; share?: boolean }) {
   const used = useMemo(() => {
-    const ids = new Set(scene.pieces.filter((p) => showInferred || !p.inferred).map((p) => p.materialId));
+    // a buyer sees the finishes of the house, not the staging (cars, bay lines, light fittings, flames)
+    const staging = (p: PropertySceneGraph["pieces"][number]) => share && (p.elementKind === "vehicle" || p.elementKind === "light" || /bayline|fire|light/.test(p.materialId));
+    const ids = new Set(scene.pieces.filter((p) => (showInferred || !p.inferred) && !staging(p)).map((p) => p.materialId));
     return scene.materials.filter((m) => ids.has(m.id));
-  }, [scene, showInferred]);
+  }, [scene, showInferred, share]);
   return (
     <div className="panel p-3 space-y-1.5">
       <div className="label">Finishes in the model</div>

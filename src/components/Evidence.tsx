@@ -10,9 +10,12 @@ export const pageOfRef = (ref: string) => (/^page-(\d+)$/.test(ref) ? Number(ref
 export function EvidenceList({ evidence, dossier, jobId, compact }: { evidence: Evidence[]; dossier?: PropertyDossier | null; jobId: string; compact?: boolean }) {
   const focusPage = useStudio((s) => s.focusPage);
   if (!evidence.length) return <div className="text-xs text-inferred">No evidence: inferred default.</div>;
+  // the same page and quote cited twice (e.g. a room read from two passes over one plan) shows once
+  const seen = new Set<string>();
+  const rows = evidence.filter((e) => { const k = `${e.ref}|${(e.quote ?? "").slice(0, 80)}`; if (seen.has(k)) return false; seen.add(k); return true; });
   return (
     <ul className="space-y-1.5">
-      {evidence.map((e, i) => {
+      {rows.map((e, i) => {
         const inferred = e.ref.startsWith(INFERRED_PREFIX);
         const page = pageOfRef(e.ref);
         const asset = dossier?.assets.find((a) => a.id === e.ref);

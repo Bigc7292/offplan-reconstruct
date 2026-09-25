@@ -12,9 +12,9 @@ import { dHash, hamming, imageStats } from "./image-stats";
 import { ocrImage } from "./ocr";
 import type { NewJobInput } from "./pipeline";
 
-export type AssetIndexEntry = IngestedAsset & { sourceId: string; alt?: string; origin: "pdf_crop" | "page" | "url_image" | "upload" };
+export type AssetIndexEntry = IngestedAsset & { sourceId: string; alt?: string; origin: "pdf_crop" | "page" | "url_image" | "upload"; /** what a crop cut from a scanned page is */ cut?: "render" | "key_plan" };
 
-const safeName = (s: string) => s.replace(/[^a-z0-9._-]+/gi, "_").slice(0, 120);
+export const safeName = (s: string) => s.replace(/[^a-z0-9._-]+/gi, "_").slice(0, 120);
 
 export async function registerSources(jobId: string, input: NewJobInput) {
   const sources: SourceRecord[] = [];
@@ -44,18 +44,15 @@ export async function registerSources(jobId: string, input: NewJobInput) {
   await updateJob(jobId, (j) => { j.sources = sources; });
 }
 
-async function isPrivateHost(url: string) {
+export async function isPrivateHost(url: string) {
   if (process.env.ALLOW_PRIVATE_URLS === "1") return false;
   const host = new URL(url).hostname;
   const addrs = net.isIP(host) ? [host] : (await dns.lookup(host, { all: true }).catch(() => [])).map((a) => a.address);
   return addrs.some((a) => /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.|::1$|fc|fd|fe80)/i.test(a));
 }
 
-export async function ingestAll(jobId: string) {
-  const job = (await readJob(jobId))!;
-  const pages: PageRecord[] = [];
-  const assets: AssetIndexEntry[] = [];
-  const extraSources: SourceRecord[] = [];
+/** Page and image ingest that appends to the given lists (pages are numbered after the ones already there). */
+function ingestor(jobId: string, pages: PageRecord[], assets: AssetIndexEntry[]) {
   const nextN = () => pages.length + 1;
 
   const addPdf = async (src: SourceRecord, data: Buffer) => {
@@ -90,6 +87,37 @@ export async function ingestAll(jobId: string) {
     });
     assets.push({ id: `a${n}-${hash.slice(0, 8)}`, path: rel, page: n, bbox: [0, 0, 1, 1], hash, w: meta.width!, h: meta.height!, sourceId: src.id, alt, origin });
   };
+  return { addPdf, addImage, nextN };
+}
+
+/**
+ * Ingest sources added after the first ingest (floor plans found online). Existing pages keep their numbers;
+ * the new pages come after them. Returns the new pages and their assets (not yet labelled).
+ */
+export async function appendSources(jobId: string, added: Array<{ src: SourceRecord; data: Buffer }>) {
+  const job = (await readJob(jobId))!;
+  const pages = [...job.pages];
+  const assets = await readAssetIndex(jobId);
+  const before = { pages: pages.length, assets: assets.length };
+  const { addPdf, addImage } = ingestor(jobId, pages, assets);
+  for (const { src, data } of added) {
+    if (src.kind === "pdf") await addPdf(src, data);
+    else await addImage(src, data, src.name, "upload");
+  }
+  await writeJobFile(jobId, "assets-index.json", JSON.stringify(assets, null, 2));
+  await updateJob(jobId, (j) => {
+    j.pages = pages;
+    j.sources = [...j.sources, ...added.map((a) => a.src).filter((s) => !j.sources.some((x) => x.id === s.id))];
+  });
+  return { pages: pages.slice(before.pages), assets: assets.slice(before.assets) };
+}
+
+export async function ingestAll(jobId: string) {
+  const job = (await readJob(jobId))!;
+  const pages: PageRecord[] = [];
+  const assets: AssetIndexEntry[] = [];
+  const extraSources: SourceRecord[] = [];
+  const { addPdf, addImage, nextN } = ingestor(jobId, pages, assets);
 
   for (const src of job.sources) {
     try {
@@ -136,7 +164,10 @@ export async function ingestAll(jobId: string) {
           if (!m || (m.width ?? 0) < 320 || (m.height ?? 0) < 200) continue; // icons, avatars, trackers
           await addImage({ ...src }, got.data, img.alt || undefined, "url_image");
         }
-        for (const pdfUrl of u.pdfLinks.slice(0, 3)) {
+        // a development page can link a plan PDF per plot: fetch the ones that match the unit asked about first
+        const ranked = rankPdfLinks(u.pdfLinks, [job.unitFocus, job.notes].filter(Boolean).join(" "));
+        if (u.pdfLinks.length > 3) await log(jobId, "ingest", `${u.pdfLinks.length} linked PDFs; fetching the 3 most relevant${job.unitFocus ? ` to "${job.unitFocus}"` : ""}: ${ranked.slice(0, 3).map((x) => path.basename(new URL(x).pathname)).join(", ")}.`);
+        for (const pdfUrl of ranked.slice(0, 3)) {
           if (await isPrivateHost(pdfUrl)) continue;
           const got = await download(pdfUrl);
           if (!got || got.data.subarray(0, 5).toString() !== "%PDF-") continue;
@@ -180,4 +211,35 @@ export async function readAssetIndex(jobId: string): Promise<AssetIndexEntry[]> 
   } catch {
     return [];
   }
+}
+
+const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"];
+
+/**
+ * Order a listing's PDF links by relevance: plan / brochure documents first, and those naming the unit
+ * the user asked about ("Villa 8" → "Plot-8…", "Type 4" → "…Type-Four…") before the rest. Stable otherwise.
+ */
+export function rankPdfLinks(links: string[], hint: string): string[] {
+  const h = hint.toLowerCase();
+  const nums = [...h.matchAll(/\b(?:villa|plot|unit|no\.?|number|apt|apartment|house)\s*#?\s*(\d{1,4})\b/g)].map((m) => Number(m[1]));
+  const types = [...h.matchAll(/\btype\s*([a-z0-9]{1,6})\b/g)].map((m) => m[1]);
+  const score = (url: string) => {
+    let name = url.toLowerCase();
+    try { name = decodeURIComponent(new URL(url).pathname.split("/").pop() ?? url).toLowerCase(); } catch { /* keep raw */ }
+    const words = name.replace(/\.pdf$/, "").split(/[^a-z0-9]+/).filter(Boolean);
+    let sc = 0;
+    if (/brochure|floor|plan|layout/.test(name)) sc += 2;
+    for (const n of nums) {
+      // "plot-8", "villa_8", "p14", "plot14": a number standing alone after a label word, or glued to a short prefix
+      const i = words.findIndex((w, k) => (w === String(n) && k > 0 && /^[a-z]{1,6}$/.test(words[k - 1])) || new RegExp(`^[a-z]{1,6}0*${n}$`).test(w));
+      if (i >= 0) sc += 6;
+    }
+    for (const t of types) {
+      const alt = /^\d+$/.test(t) ? NUMBER_WORDS[Number(t)] : String(NUMBER_WORDS.indexOf(t));
+      const k = words.indexOf("type");
+      if (k >= 0 && (words[k + 1] === t || words[k + 1] === alt)) sc += 3;
+    }
+    return sc;
+  };
+  return links.map((l, i) => ({ l, i, s: score(l) })).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.l);
 }

@@ -1,7 +1,7 @@
 // Material resolution: dossier Material → renderable PBR parameters.
 // A material is used exactly as documented when its albedoHint is a hex colour;
 // otherwise the name/hint is mapped to a PBR approximation (flagged in the UI).
-import type { Material, PropertyDossier, Room, SceneMaterial, Surface } from "./schema";
+import type { Material, MaterialRole, PropertyDossier, Room, SceneMaterial, Surface } from "./schema";
 import { isInferred } from "./schema";
 
 type Pbr = { color: string; roughness: number; metalness: number; opacity?: number };
@@ -44,17 +44,72 @@ const COLOR_WORDS: Record<string, string> = {
   champagne: "#d8c49a", gold: "#c9a45c", bronze: "#7c5c3b", green: "#6d7f5e", blue: "#5b7087", navy: "#26344a",
 };
 
-export const FALLBACKS: Record<string, SceneMaterial> = {
-  "auto:wall": { id: "auto:wall", name: "Wall (default — no finish documented)", color: "#e9e5de", roughness: 0.9, metalness: 0, opacity: 1, inferred: true },
-  "auto:floor": { id: "auto:floor", name: "Floor (default — no finish documented)", color: "#cbc3b6", roughness: 0.7, metalness: 0, opacity: 1, inferred: true },
-  "auto:ceiling": { id: "auto:ceiling", name: "Ceiling (default)", color: "#f2f0eb", roughness: 0.95, metalness: 0, opacity: 1, inferred: true },
-  "auto:glass": { id: "auto:glass", name: "Glazing (default)", color: "#a9c3c9", roughness: 0.05, metalness: 0.1, opacity: 0.25, inferred: true },
-  "auto:frame": { id: "auto:frame", name: "Frame (default)", color: "#4a4a4c", roughness: 0.4, metalness: 0.8, opacity: 1, inferred: true },
-  "auto:slab": { id: "auto:slab", name: "Structural slab (default)", color: "#9d9890", roughness: 0.9, metalness: 0, opacity: 1, inferred: true },
-  "auto:door": { id: "auto:door", name: "Door leaf (default)", color: "#d9d2c6", roughness: 0.6, metalness: 0, opacity: 1, inferred: true },
-  "auto:fabric": { id: "auto:fabric", name: "Soft furnishing proxy", color: "#ddd6ca", roughness: 0.95, metalness: 0, opacity: 1, inferred: true },
-  "auto:ceramic": { id: "auto:ceramic", name: "Sanitaryware proxy", color: "#f4f3f0", roughness: 0.2, metalness: 0, opacity: 1, inferred: true },
-  "auto:joinery": { id: "auto:joinery", name: "Joinery proxy (default)", color: "#a58a6c", roughness: 0.6, metalness: 0, opacity: 1, inferred: true },
+const fb = (id: string, name: string, color: string, roughness: number, metalness = 0, opacity = 1, extra: Partial<SceneMaterial> = {}): [string, SceneMaterial] =>
+  [id, { id, name, color, roughness, metalness, opacity, inferred: true, ...extra }];
+
+/** Finishes the brochure does not document. Named for what they are, marked illustrative (assumed) in the UI. */
+export const FALLBACKS: Record<string, SceneMaterial> = Object.fromEntries([
+  fb("auto:wall", "Painted plaster (assumed)", "#ebe6de", 0.9),
+  fb("auto:facade", "White facade render (assumed)", "#efebe4", 0.85),
+  fb("auto:cap", "Wall section (cut line)", "#3a3631", 0.9),
+  fb("auto:floor", "Porcelain floor (assumed)", "#d6cfc4", 0.55),
+  fb("auto:ceiling", "Painted ceiling (assumed)", "#f3f1ec", 0.95),
+  fb("auto:glass", "Clear glazing", "#b7ccd1", 0.04, 0.1, 0.22),
+  fb("auto:frame", "Dark bronze frames (assumed)", "#2b2a29", 0.45, 0.7),
+  fb("auto:slab", "Structural slab", "#9d9890", 0.9),
+  fb("auto:door", "Oak door leaf (assumed)", "#b89a78", 0.6),
+  fb("auto:fabric", "Upholstery (illustrative)", "#d7cfc2", 0.95),
+  fb("auto:cushion", "Cushion fabric (illustrative)", "#b3a58f", 0.95),
+  fb("auto:accent", "Accent cushion (illustrative)", "#8a6f55", 0.95),
+  fb("auto:linen", "Bed linen (illustrative)", "#f3f0ea", 0.9),
+  fb("auto:throw", "Throw (illustrative)", "#8c7b68", 0.95),
+  fb("auto:timber", "Dark timber (illustrative)", "#4a3a2e", 0.5),
+  fb("auto:teak", "Teak (illustrative)", "#8b6239", 0.6),
+  fb("auto:metal", "Brushed metal (illustrative)", "#b9b2a6", 0.3, 1),
+  fb("auto:black", "Black metal (illustrative)", "#1f1f21", 0.45, 0.6),
+  fb("auto:mirror", "Mirror", "#dfe6ea", 0.03, 1),
+  fb("auto:ceramic", "White sanitaryware", "#f4f3f0", 0.18),
+  fb("auto:stone", "Stone top (illustrative)", "#e4ded4", 0.3),
+  fb("auto:rug", "Wool rug (illustrative)", "#c9bca8", 1),
+  fb("auto:curtain", "Sheer curtain (illustrative)", "#efe9df", 0.95, 0, 0.82),
+  fb("auto:pot", "Planter (illustrative)", "#6e6a63", 0.7),
+  fb("auto:leaf", "Planting (illustrative)", "#5b7a3e", 0.9),
+  fb("auto:hedge", "Hedge (illustrative)", "#4f6e35", 1),
+  fb("auto:trunk", "Tree trunk (illustrative)", "#5d4a39", 0.9),
+  fb("auto:palmtrunk", "Palm trunk (illustrative)", "#8a7560", 0.9),
+  fb("auto:water", "Pool water", "#2fa3bd", 0.03, 0.1, 0.78),
+  fb("auto:pooltile", "Pool mosaic (assumed)", "#1d9fb6", 0.3),
+  fb("auto:coping", "Stone coping (assumed)", "#d8d0c4", 0.6),
+  fb("auto:joinery", "Joinery (assumed)", "#a58a6c", 0.6),
+  fb("auto:soffit", "Slab soffit, painted (assumed)", "#f1ede6", 0.9),
+  fb("auto:fascia", "Slab edge (assumed)", "#3b3835", 0.6),
+  fb("auto:roof", "Roof membrane (assumed)", "#bdb7ad", 0.95),
+  fb("auto:paving", "Stone paving (assumed)", "#d6cec4", 0.8),
+  fb("auto:lawn", "Lawn (illustrative)", "#6f9a4c", 1),
+  fb("auto:boundary", "Boundary wall, render (assumed)", "#e6e0d6", 0.9),
+  fb("auto:gate", "Metal gate (assumed)", "#2d2c2b", 0.5, 0.6),
+  fb("auto:stair", "Stone stair (assumed)", "#e3ddd3", 0.45),
+  fb("auto:concrete", "Concrete (assumed)", "#a8a39b", 0.85),
+  fb("auto:bayline", "Parking bay marking", "#f2f2ee", 0.6),
+  fb("auto:asphalt", "Driveway (assumed)", "#5a5854", 0.9),
+  fb("auto:carpaint1", "Car (illustrative)", "#1c1d20", 0.25, 0.6),
+  fb("auto:carpaint2", "Car (illustrative)", "#d9d9d6", 0.25, 0.6),
+  fb("auto:carpaint3", "Car (illustrative)", "#4b4f55", 0.25, 0.6),
+  fb("auto:carpaint4", "Car (illustrative)", "#26344a", 0.25, 0.6),
+  fb("auto:tyre", "Tyres (illustrative)", "#161616", 0.8),
+  fb("auto:carglass", "Car glass (illustrative)", "#1a2126", 0.05, 0.3),
+  fb("auto:outdoor", "Outdoor cushion (illustrative)", "#e8e2d6", 0.95),
+  fb("auto:screen", "Timber slat screen (assumed)", "#9a7350", 0.65),
+  fb("auto:pergola", "Pergola (assumed)", "#3a3633", 0.55, 0.3),
+  fb("auto:light", "Light fitting (illustrative)", "#fff3dc", 0.5, 0, 1, { emissive: "#ffd9a0", emissiveIntensity: 1.1 }),
+  fb("auto:fire", "Fire pit flame (illustrative)", "#ff9a3c", 0.5, 0, 1, { emissive: "#ff7a1c", emissiveIntensity: 3 }),
+]);
+
+/** Which documented exterior role serves each builder role. */
+export const ROLE_OF: Record<string, MaterialRole> = {
+  facade: "facade_wall", fascia: "slab_edge", soffit: "soffit", frame: "window_frame", screen: "screen", pergola: "pergola",
+  balustrade: "balustrade", roof: "roof", paving: "paving", lawn: "lawn", boundary: "boundary_wall", gate: "gate",
+  coping: "pool_coping", water: "pool_water", asphalt: "driveway",
 };
 
 export function toPbr(m: Material): { pbr: Pbr; approximated: boolean } {
@@ -88,7 +143,13 @@ export function sceneMaterialFor(m: Material, textureAssetPath?: string): SceneM
  * program-bound ones, which beat unbound ones. Returns undefined when nothing
  * documented applies (the builder then uses a flagged default).
  */
-export function resolveMaterial(d: PropertyDossier, surface: Surface, room?: Room): Material | undefined {
+/** Which floor a render's caption names ("Lounge – First Floor" → "first"), if any. */
+export function floorOf(text?: string): string | undefined {
+  const m = text?.match(/\b(basement|ground|first|second|third|roof(?:top)?|mezzanine)/i);
+  return m ? m[1].toLowerCase().replace("rooftop", "roof") : undefined;
+}
+
+export function resolveMaterial(d: PropertyDossier, surface: Surface, room?: Room, levelName?: string): Material | undefined {
   const cands = d.materials.filter((m) => m.appliedTo.includes(surface));
   if (room) {
     const byRoom = cands.find((m) => m.roomIds?.includes(room.id));
@@ -97,7 +158,10 @@ export function resolveMaterial(d: PropertyDossier, surface: Surface, room?: Roo
       const bySet = cands.find((m) => m.id === room.materialSetId || m.id.startsWith(`${room.materialSetId}/`));
       if (bySet) return bySet;
     }
-    const byProgram = cands.find((m) => m.programs?.includes(room.program));
+    // a render captioned for this floor first, then one that names no floor, then one from another floor
+    const lf = floorOf(levelName);
+    const rank = (m: Material) => { const f = floorOf(m.evidence[0]?.quote); return f === undefined ? 1 : f === lf ? 0 : 2; };
+    const byProgram = cands.filter((m) => m.programs?.includes(room.program)).sort((a, b) => rank(a) - rank(b))[0];
     if (byProgram) return byProgram;
   }
   return cands.find((m) => !m.roomIds?.length && !m.programs?.length);

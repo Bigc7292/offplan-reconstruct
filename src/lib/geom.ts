@@ -115,3 +115,21 @@ function distToLine(p: Vec2, a: Vec2, b: Vec2) {
 }
 
 export const SQFT_PER_M2 = 10.7639;
+
+/**
+ * A good first-person viewpoint for a room: near one end of its long axis, looking down the length
+ * of the room (the way a buyer would stand in the doorway). Yaw follows the walk camera's convention
+ * (0 = looking north / plan +y, positive = turning left).
+ */
+export function roomViewpoint(poly: Vec2[]): { x: number; y: number; yawDeg: number } {
+  const c = polygonCentroid(poly);
+  const b = bboxOf(poly);
+  const w = b.maxX - b.minX, d = b.maxY - b.minY;
+  const tries: Array<{ x: number; y: number; dx: number; dy: number }> = w >= d
+    ? [{ x: b.minX + w * 0.15, y: c.y, dx: 1, dy: 0 }, { x: b.maxX - w * 0.15, y: c.y, dx: -1, dy: 0 }]
+    : [{ x: c.x, y: b.minY + d * 0.15, dx: 0, dy: 1 }, { x: c.x, y: b.maxY - d * 0.15, dx: 0, dy: -1 }];
+  for (const t of tries) {
+    if (pointInPolygon({ x: t.x, y: t.y }, poly)) return { x: t.x, y: t.y, yawDeg: (Math.atan2(-t.dx, t.dy) * 180) / Math.PI };
+  }
+  return { x: c.x, y: c.y, yawDeg: w >= d ? -90 : 0 };
+}

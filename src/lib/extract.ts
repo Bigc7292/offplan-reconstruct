@@ -7,6 +7,8 @@ import { claudeFacts, localFacts } from "./extract-facts";
 import { extractPlans } from "./extract-plan";
 import { extractMaterials } from "./extract-materials";
 import { extractorKind, extractorLabel } from "./llm";
+import { findPlansOnline } from "./find-plans";
+import { isPlanPage } from "./classify";
 import { normalizeDossier } from "./normalize";
 import { reconstruct } from "./reconstruct";
 import { settle } from "./concurrency";
@@ -48,6 +50,14 @@ export async function extractAll(jobId: string): Promise<PropertyDossier> {
       d.projectName = cf.projectName ?? d.projectName;
       d.developer = cf.developer ?? d.developer;
       d.location = cf.location ?? d.location;
+      // the model read every page: keep the local pass's facts only where the model has no fact of that kind and the
+      // text is the brochure's own text layer. A web page can describe a whole community (every villa collection,
+      // their bedroom counts and plot sizes), and pattern-matching its numbers would pin them on this unit.
+      const pageOf = (ref?: string) => job.pages.find((p) => `page-${p.n}` === ref);
+      const modelKeys = new Set(cf.facts.map((f) => f.key));
+      const dropped = d.facts.filter((f) => modelKeys.has(f.key) || pageOf(f.evidence[0]?.ref)?.textSource !== "text_layer");
+      d.facts = d.facts.filter((f) => !dropped.includes(f));
+      if (dropped.length) await log(jobId, "extract", `Kept the model's facts over ${dropped.length} pattern-matched one(s) from OCR or web text.`);
       for (const f of cf.facts) if (!d.facts.some((x) => x.key === f.key && x.value === f.value)) d.facts.push(f);
       for (const u of cf.unitTypes) if (!d.unitTypes.some((x) => x.id === u.id)) d.unitTypes.push(u);
       d.warnings.push(...cf.warnings);
@@ -57,9 +67,21 @@ export async function extractAll(jobId: string): Promise<PropertyDossier> {
   }
   for (const f of d.facts.slice(0, 200)) await log(jobId, "extract", `${f.key} = ${f.value}  [${f.evidence[0]?.ref}]`, "fact");
 
+  // B0. no floor plan in any source: look for the unit's plans online; what is found becomes a source of its own
+  let pages = job.pages;
+  if (!pages.some(isPlanPage)) {
+    const found = await findPlansOnline(jobId, d);
+    d.warnings.push(...found.warnings);
+    if (found.pages.length) {
+      pages = [...pages, ...found.pages];
+      assets.push(...found.assets);
+      d.assets.push(...found.assets.map<Asset>((a) => ({ id: a.id, kind: a.kind, path: a.path, caption: a.caption, page: a.page })));
+    }
+  }
+
   // B. plans
   const ceil = d.facts.find((f) => f.key === "ceiling_height_m");
-  const plans = await extractPlans(jobId, job.pages, assets, d.unitTypes, useClaude, ceil ? { value: Number(ceil.value), evidence: ceil.evidence[0] } : undefined,
+  const plans = await extractPlans(jobId, pages, assets, d.unitTypes, useClaude, ceil ? { value: Number(ceil.value), evidence: ceil.evidence[0] } : undefined,
     (levels) => writePreview(jobId, d, levels));
   d.levels = plans.levels;
   d.unitTypes = plans.unitTypes;
@@ -73,6 +95,7 @@ export async function extractAll(jobId: string): Promise<PropertyDossier> {
   if (!matsR.ok) throw matsR.error;
   const mats = matsR.value;
   d.materials = mats.materials;
+  if ("exterior" in mats && mats.exterior) d.exterior = mats.exterior;
   d.facts.push(...mats.facts);
   d.warnings.push(...mats.warnings);
 
