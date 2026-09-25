@@ -340,7 +340,8 @@ export const KEY_PLAN_SYSTEM = `You are an architectural draughtsman tracing a k
 
 export const CGI_SYSTEM = `Identify materials, colors, fixtures, and likely room.
 Return Material[] plus a short lighting mood.
-Quote any visible caption. Do not guess stone names that are not written or obvious.`;
+Quote any visible caption. Do not guess stone names that are not written or obvious.
+For an exterior render, also fill "exterior": how deep the slab edges read (none, thin, deep), how far slabs and roofs project past the walls in metres, which parts of the house carry a vertical slatted screen (room kinds such as stair, lift, entrance, bedroom), and whether a louvred or slatted pergola covers a roof terrace.`;
 
 export const CgiSchema = z.object({
   caption: z.string().nullable(),
@@ -357,6 +358,12 @@ export const CgiSchema = z.object({
     regionBbox: z.array(z.number()).length(4).describe("image-normalised 0-1 region where the material is visible"),
     nameIsWrittenOrObvious: z.boolean(),
   })),
+  exterior: z.object({
+    slabEdges: z.enum(["none", "thin", "deep"]).optional(),
+    overhangM: z.number().optional(),
+    screensOn: z.array(z.string()).default([]).describe("room kinds whose outside walls carry a vertical slatted screen, e.g. stair, lift, entrance"),
+    pergola: z.boolean().optional(),
+  }).optional(),
 });
 
 export const CLASSIFY_SYSTEM = `You classify pages of off-plan real-estate brochures. A page can have several labels.

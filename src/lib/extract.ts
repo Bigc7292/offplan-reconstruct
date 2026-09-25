@@ -95,6 +95,7 @@ export async function extractAll(jobId: string): Promise<PropertyDossier> {
   if (!matsR.ok) throw matsR.error;
   const mats = matsR.value;
   d.materials = mats.materials;
+  if ("exterior" in mats && mats.exterior) d.exterior = mats.exterior;
   d.facts.push(...mats.facts);
   d.warnings.push(...mats.warnings);
 

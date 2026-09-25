@@ -222,7 +222,7 @@ export function emitPlates(e: Emit, st: Storey[], opts: { overhang: number; fasc
     const indoor = s.level.rooms.filter((r) => r.polygon.length >= 3 && !isOutdoor(r) && !isRamp(r)).map((r) => r.polygon);
     if (!indoor.length) continue;
     let g = fill(newGrid(), indoor);
-    g = offsetGrid(g, Math.max(0.1, opts.overhang * 1.6));
+    g = offsetGrid(g, Math.max(0.1, Math.min(1.5, opts.overhang * 1.25)));
     const y0 = s.E + s.ceilingH + 0.05;
     for (const o of outlines(g)) {
       e.push({ elementId: `${s.level.id}-roof`, elementKind: "roof", levelId: s.level.id, materialId: e.mat("roof"), inferred: true, shape: { type: "poly", polygon: o.outer, holes: o.holes, y: r3(y0), thickness: 0.3 } });
@@ -312,6 +312,104 @@ export function emitRamp(e: Emit, s: Storey, r: Room) {
   const upAtT = Math.hypot(T.x - mid.x, T.y - mid.y) > Math.hypot(S.x - mid.x, S.y - mid.y);
   const [lo, hi] = upAtT ? [S, T] : [T, S];
   e.push({ elementId: r.id, elementKind: "floor", levelId: s.level.id, materialId: e.mat("concrete"), inferred: true, shape: pitchedBox({ ...lo, h: s.E }, { ...hi, h: s.E + rise - 0.02 }, width, 0.25, -0.25) });
+  // the ramp is carried on solid fill down to the storey floor, and has kerbs, so it reads as built, not floating
+  const N = 10;
+  for (let i = 0; i < N; i++) {
+    const t0 = i / N, t1 = (i + 1) / N;
+    const a = { x: lo.x + (hi.x - lo.x) * t0, y: lo.y + (hi.y - lo.y) * t0 }, b = { x: lo.x + (hi.x - lo.x) * t1, y: lo.y + (hi.y - lo.y) * t1 };
+    const h = (rise - 0.02) * t0 - 0.24;
+    if (h > 0.05) e.push({ elementId: `${r.id}-fill`, elementKind: "floor", levelId: s.level.id, materialId: e.mat("concrete"), inferred: true, shape: lineBox(a, b, s.E, s.E + h, width + 0.3) });
+  }
+  for (const side of [-1, 1]) {
+    const nx = alongX ? 0 : 1, ny = alongX ? 1 : 0, off = side * (width / 2 + 0.1);
+    e.push({ elementId: `${r.id}-kerb`, elementKind: "wall", levelId: s.level.id, materialId: e.mat("concrete"), inferred: true, shape: pitchedBox({ x: lo.x + nx * off, y: lo.y + ny * off, h: s.E }, { x: hi.x + nx * off, y: hi.y + ny * off, h: s.E + rise - 0.02 }, 0.2, 1.0, -0.25) });
+  }
+}
+
+// ───────────────────────── facade screens and pergolas ─────────────────────────
+
+/** Edges of a room's outline that face the outside of its storey (nothing indoor just beyond them). */
+function outsideEdges(s: Storey, r: Room): Array<[Vec2, Vec2, Vec2]> {
+  const others = s.level.rooms.filter((x) => x !== r && x.polygon.length >= 3 && !isOutdoor(x));
+  const out: Array<[Vec2, Vec2, Vec2]> = [];
+  for (let i = 0; i < r.polygon.length; i++) {
+    const a = r.polygon[i], b = r.polygon[(i + 1) % r.polygon.length];
+    const L = Math.hypot(b.x - a.x, b.y - a.y);
+    if (L < 0.8) continue;
+    const m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, n = { x: -(b.y - a.y) / L, y: (b.x - a.x) / L };
+    // the normal pointing away from the room
+    const probe = (k: number) => ({ x: m.x + n.x * k, y: m.y + n.y * k });
+    const sgn = pointInPolygon(probe(0.3), r.polygon) ? -1 : 1;
+    const p = probe(0.5 * sgn);
+    if (others.some((x) => pointInPolygon(p, x.polygon))) continue;
+    out.push([a, b, { x: n.x * sgn, y: n.y * sgn }]);
+  }
+  return out;
+}
+
+/**
+ * Vertical timber slats standing just off the outside walls of the rooms the exterior renders show screened
+ * (e.g. the stair and lift core), full storey height, on every storey above ground that has such a room.
+ */
+export function emitScreens(e: Emit, st: Storey[], kinds: string[]) {
+  if (!kinds.length) return;
+  const re = new RegExp(`\\b(${kinds.map((k) => k.replace(/[^a-z ]/gi, "").trim()).filter(Boolean).join("|")})`, "i");
+  for (const s of st) {
+    if (s.E < -0.5) continue;
+    const h = s.above ? s.above.E - s.E : s.ceilingH + 0.35;
+    for (const r of s.level.rooms) {
+      if (r.polygon.length < 3 || isOutdoor(r) || !re.test(r.name)) continue;
+      for (const [a, b, n] of outsideEdges(s, r)) {
+        const L = Math.hypot(b.x - a.x, b.y - a.y), ux = (b.x - a.x) / L, uy = (b.y - a.y) / L;
+        const k = Math.floor((L - 0.1) / 0.16);
+        for (let i = 0; i <= k; i++) {
+          const t = 0.05 + i * 0.16, off = 0.18;
+          const c = { x: a.x + ux * t + n.x * off, y: a.y + uy * t + n.y * off };
+          e.push({ elementId: `${r.id}-screen`, elementKind: "screen", levelId: s.level.id, materialId: e.mat("screen"), inferred: true, shape: lineBox({ x: c.x - ux * 0.03, y: c.y - uy * 0.03 }, { x: c.x + ux * 0.03, y: c.y + uy * 0.03 }, s.E - 0.3, s.E + h - 0.3, 0.1) });
+        }
+      }
+    }
+  }
+}
+
+/** A louvred pergola over the part of the top roof terrace next to the house, on slim posts. */
+export function emitPergola(e: Emit, st: Storey[]) {
+  const s = [...st].reverse().find((x) => x.level.rooms.some((r) => roomKind(r) === "terrace"));
+  if (!s) return;
+  const indoor = s.level.rooms.filter((r) => r.polygon.length >= 3 && !isOutdoor(r));
+  if (!indoor.length) return;
+  const ib = bboxOf(indoor.map((r) => r.polygon));
+  const y = s.E + s.ceilingH + 0.15;
+  for (const r of s.level.rooms.filter((x) => roomKind(x) === "terrace" && x.polygon.length >= 3)) {
+    const tb = bboxOf([r.polygon]);
+    // at most 4 m out from the indoor rooms
+    const b = { minX: Math.max(tb.minX, ib.minX - 4), maxX: Math.min(tb.maxX, ib.maxX + 4), minY: Math.max(tb.minY, ib.minY - 4), maxY: Math.min(tb.maxY, ib.maxY + 4) };
+    if (b.maxX - b.minX < 2 || b.maxY - b.minY < 2) continue;
+    const alongX = b.maxX - b.minX >= b.maxY - b.minY;
+    const inside = (p: Vec2) => pointInPolygon(p, r.polygon);
+    // louvres across the short side every 0.3 m
+    const span = alongX ? b.maxX - b.minX : b.maxY - b.minY;
+    const at = (t: number, u: number) => (alongX ? { x: b.minX + t, y: u } : { x: u, y: b.minY + t });
+    const [u0, u1] = alongX ? [b.minY + 0.1, b.maxY - 0.1] : [b.minX + 0.1, b.maxX - 0.1];
+    const kept: number[] = [];
+    for (let t = 0.15; t < span; t += 0.3) {
+      const p0 = at(t, u0), p1 = at(t, u1);
+      if (!inside({ x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 }) || indoor.some((x) => pointInPolygon({ x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 }, x.polygon))) continue;
+      kept.push(t);
+      e.push({ elementId: `${r.id}-pergola`, elementKind: "screen", levelId: s.level.id, materialId: e.mat("pergola"), inferred: true, shape: lineBox(p0, p1, y, y + 0.2, 0.05) });
+    }
+    if (kept.length < 4) continue;
+    // two beams carry the louvres, on posts where they stand clear of the rooms
+    const t0 = kept[0] - 0.1, t1 = kept[kept.length - 1] + 0.1;
+    for (const u of [u0, u1]) {
+      e.push({ elementId: `${r.id}-pergola`, elementKind: "screen", levelId: s.level.id, materialId: e.mat("fascia"), inferred: true, shape: lineBox(at(t0, u), at(t1, u), y + 0.2, y + 0.42, 0.14) });
+      for (const t of [t0, t1]) {
+        const a = at(t, u);
+        if (!inside(a) || indoor.some((x) => pointInPolygon(a, x.polygon))) continue;
+        e.push({ elementId: `${r.id}-pergola`, elementKind: "screen", levelId: s.level.id, materialId: e.mat("fascia"), inferred: true, shape: { type: "box", center: { x: r3(a.x), y: r3((s.E + y + 0.42) / 2), z: r3(-a.y) }, size: { x: 0.15, y: r3(y + 0.42 - s.E), z: 0.15 }, rotY: 0 } });
+      }
+    }
+  }
 }
 
 export function emitParking(e: Emit, s: Storey, r: Room, target: number | undefined, used: { n: number }) {
@@ -334,9 +432,24 @@ export function emitParking(e: Emit, s: Storey, r: Room, target: number | undefi
   // bays 2.5 × 5.0 in rows along the long side, a 6 m aisle between facing rows
   const alongX = W >= H;
   const long = alongX ? W : H, short = alongX ? H : W;
+  const P0 = (along: number, across: number): Vec2 => (alongX ? { x: b.minX + along, y: b.minY + across } : { x: b.minX + across, y: b.minY + along });
+  // try a row of bays at every offset across the room; keep the fullest rows that leave a 6 m aisle between them
+  const fits = (off: number) => {
+    let k = 0;
+    for (let i = 0; i < Math.floor((long - 0.4) / 2.5); i++) {
+      const a0 = 0.2 + i * 2.5, a1 = a0 + 2.5;
+      if ([P0(a0, off), P0(a1, off), P0(a1, off + 5), P0(a0, off + 5)].every((c) => pointInPolygon(c, r.polygon))) k++;
+    }
+    return k;
+  };
+  const cands: Array<{ off: number; k: number }> = [];
+  for (let off = 0; off <= short - 5 + 1e-6; off += 0.25) cands.push({ off, k: fits(off) });
+  cands.sort((x, y) => y.k - x.k || x.off - y.off);
   const rows: Array<{ off: number; facing: 1 | -1 }> = [];
-  if (short >= 16) rows.push({ off: 0, facing: 1 }, { off: short - 5, facing: -1 });
-  else if (short >= 5.2) rows.push({ off: short >= 11 ? 0 : (short - 5) / 2, facing: 1 });
+  for (const c of cands) {
+    if (c.k === 0) break;
+    if (rows.every((r0) => Math.abs(r0.off - c.off) >= 11 - 1e-6)) rows.push({ off: c.off, facing: 1 });
+  }
   const line = (p0: Vec2, p1: Vec2) => e.push({ elementId: `${r.id}-bays`, elementKind: "site", levelId: L, materialId: e.mat("bayline"), inferred: true, shape: lineBox(p0, p1, E + 0.001, E + 0.006, 0.1) });
   const P = (along: number, across: number): Vec2 => (alongX ? { x: b.minX + along, y: b.minY + across } : { x: b.minX + across, y: b.minY + along });
   for (const row of rows) {

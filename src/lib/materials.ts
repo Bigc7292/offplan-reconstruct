@@ -143,7 +143,13 @@ export function sceneMaterialFor(m: Material, textureAssetPath?: string): SceneM
  * program-bound ones, which beat unbound ones. Returns undefined when nothing
  * documented applies (the builder then uses a flagged default).
  */
-export function resolveMaterial(d: PropertyDossier, surface: Surface, room?: Room): Material | undefined {
+/** Which floor a render's caption names ("Lounge – First Floor" → "first"), if any. */
+export function floorOf(text?: string): string | undefined {
+  const m = text?.match(/\b(basement|ground|first|second|third|roof(?:top)?|mezzanine)/i);
+  return m ? m[1].toLowerCase().replace("rooftop", "roof") : undefined;
+}
+
+export function resolveMaterial(d: PropertyDossier, surface: Surface, room?: Room, levelName?: string): Material | undefined {
   const cands = d.materials.filter((m) => m.appliedTo.includes(surface));
   if (room) {
     const byRoom = cands.find((m) => m.roomIds?.includes(room.id));
@@ -152,7 +158,10 @@ export function resolveMaterial(d: PropertyDossier, surface: Surface, room?: Roo
       const bySet = cands.find((m) => m.id === room.materialSetId || m.id.startsWith(`${room.materialSetId}/`));
       if (bySet) return bySet;
     }
-    const byProgram = cands.find((m) => m.programs?.includes(room.program));
+    // a render captioned for this floor first, then one that names no floor, then one from another floor
+    const lf = floorOf(levelName);
+    const rank = (m: Material) => { const f = floorOf(m.evidence[0]?.quote); return f === undefined ? 1 : f === lf ? 0 : 2; };
+    const byProgram = cands.filter((m) => m.programs?.includes(room.program)).sort((a, b) => rank(a) - rank(b))[0];
     if (byProgram) return byProgram;
   }
   return cands.find((m) => !m.roomIds?.length && !m.programs?.length);

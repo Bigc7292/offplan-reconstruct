@@ -109,6 +109,8 @@ if (cmd === "new") {
   const { runReconstruct, runExport } = await import("../src/lib/pipeline");
   const g = await runReconstruct(j.id);
   await runExport(j.id);
+  // the model is built: the job is ready, and it goes by the property's name rather than the file's
+  await store.updateJob(j.id, (x) => { x.status = "ready"; if (g.title) x.title = g.title; });
   console.log(`Built ${g.stats.rooms} rooms, ${g.stats.walls} walls, ${g.stats.openings} openings on ${g.levels.length} level(s).`);
   for (const w of g.warnings) console.log(`  note: ${w}`);
   console.log(`\nReview:  ${APP}/jobs/${j.id}\nWalk:    ${APP}/jobs/${j.id}/model\nShare:   ${APP}/view/${j.id}\nGLB:     ${store.jobFile(j.id, "exports/model.glb")}`);

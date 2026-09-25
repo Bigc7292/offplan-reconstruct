@@ -2,12 +2,13 @@
 // Claude path: materials + lighting mood per render. Local path: floor and wall tones are
 // sampled from each interior render and bound to the room program named in its caption.
 // Stone/wood names are only used when written in a caption or finish schedule.
-import type { Evidence, Material, PageRecord, Surface } from "./schema";
+import type { Evidence, Exterior, Material, PageRecord, Surface } from "./schema";
 import type { AssetIndexEntry } from "./ingest";
 import { callStructured, CGI_SYSTEM, CgiSchema } from "./llm";
 import { jobFile, log } from "./store";
 import { regionColor } from "./image-stats";
 import { programFor } from "./extract-plan";
+import { floorOf } from "./materials";
 import sharp from "sharp";
 import type * as z from "zod/v4";
 
@@ -17,7 +18,8 @@ const NAMED_FINISH = /\b(calacatta|statuario|carrara|marble|travertine|limestone
 
 export async function extractMaterials(
   jobId: string, pages: PageRecord[], assets: LabelledAsset[], useClaude: boolean,
-): Promise<{ materials: Material[]; warnings: string[]; facts: Array<{ key: string; value: string; evidence: Evidence[] }> }> {
+): Promise<{ materials: Material[]; warnings: string[]; facts: Array<{ key: string; value: string; evidence: Evidence[] }>; exterior?: Exterior }> {
+  let exterior: Exterior | undefined;
   const materials: Material[] = [];
   const warnings: string[] = [];
   const facts: Array<{ key: string; value: string; evidence: Evidence[] }> = [];
@@ -69,6 +71,8 @@ export async function extractMaterials(
       // exterior renders give the facade, slab edges, frames, paving, lawn and pool their finishes (by role)
       const r = useClaude ? await vision.get(a.id) : undefined;
       if (r?.ok) {
+        // the first exterior render that describes the massing (slab edges, overhangs, screens, pergola) sets it
+        if (!exterior && r.out.exterior) exterior = { ...r.out.exterior, evidence: [{ source: "image", ref: a.id, quote: r.out.caption ?? caption ?? `render on page ${a.page}`, confidence: 0.5 }] };
         const gain = whiteBalance(r.out.materials);
         r.out.materials.forEach((m, i) => {
           const role = roleFor(m.name, m.appliedTo);
@@ -126,12 +130,13 @@ export async function extractMaterials(
   }
   if (!cgi.length) warnings.push("No CGI or photos found; finishes use neutral defaults (marked inferred).");
   await log(jobId, "extract", `Material pass: ${materials.length} material(s) from ${cgi.length} render(s)/photo(s).`);
-  return { materials, warnings, facts };
+  return { materials, warnings, facts, exterior };
 }
 
 /** First render per room program wins; later renders of the same room are kept as references, never averaged. */
 function addBound(byProgram: Map<string, Material[]>, out: Material[], m: Material) {
-  const key = `${m.programs?.join(",") ?? "*"}|${m.appliedTo.join(",")}`;
+  // renders of the same kind of room on different floors (a ground-floor and a first-floor lounge) stay separate
+  const key = `${m.programs?.join(",") ?? "*"}|${m.appliedTo.join(",")}|${floorOf(m.evidence[0]?.quote) ?? ""}`;
   const existing = byProgram.get(key);
   if (existing?.length) {
     existing[0].mapsFromAssetIds = [...new Set([...existing[0].mapsFromAssetIds, ...m.mapsFromAssetIds])];

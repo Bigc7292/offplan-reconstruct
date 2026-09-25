@@ -4,21 +4,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { Canvas, useThree } from "@react-three/fiber";
-import { ContactShadows, Environment, Html, Lightformer, OrbitControls, OrthographicCamera, PerspectiveCamera, Sky } from "@react-three/drei";
+import { ContactShadows, Environment, Html, Lightformer, OrbitControls, OrthographicCamera, PerspectiveCamera } from "@react-three/drei";
 import { EffectComposer, N8AO, SMAA } from "@react-three/postprocessing";
 import type { PropertySceneGraph, SceneRoom, Vec3 } from "@/lib/schema";
 import { UnitMesh, type PickInfo } from "@/scene/UnitMesh";
 import { RoomHighlight } from "@/scene/RoomHighlight";
 import { WalkControls, type WalkPose } from "@/scene/WalkControls";
 import { MeasureTool, type Measure } from "@/scene/MeasureTool";
-import { roomViewpoint } from "@/lib/geom";
-import { buildTour } from "@/lib/tour";
+import { buildTour, roomCamera } from "@/lib/tour";
 import { TourRig } from "@/scene/TourRig";
 
-/** Stand near one end of the room looking down its length, instead of at the centroid facing a wall. */
-function viewFrom(r: SceneRoom): { position: Vec3; yawDeg: number } {
-  const vp = roomViewpoint(r.polygon);
-  return { position: { x: vp.x, y: r.centroid.y, z: -vp.y }, yawDeg: vp.yawDeg };
+/** Stand where the tour would: clear of walls and furniture, far enough back to see the room, facing its furniture. */
+function viewFrom(scene: PropertySceneGraph, r: SceneRoom): { position: Vec3; yawDeg: number } {
+  const c = roomCamera(scene, r);
+  const yawDeg = (Math.atan2(-(c.lookX - c.x), c.lookY - c.y) * 180) / Math.PI;
+  return { position: { x: c.x, y: r.centroid.y, z: -c.y }, yawDeg };
 }
 
 /** Ground beyond the plot (the builder draws the plot itself: paving, lawn, boundary, pool), with a hole where the plot is. */
@@ -266,18 +266,18 @@ export default function Viewer3D(props: ViewerProps) {
   useEffect(() => {
     if (props.jumpTo) {
       const j = scene.rooms.find((x) => x.id === props.jumpTo!.roomId);
-      if (j && j.levelId === walkLevel) { setWalkStart(viewFrom(j)); return; }
+      if (j && j.levelId === walkLevel) { setWalkStart(viewFrom(scene, j)); return; }
     }
     const spawnRoom = scene.spawn.levelId === walkLevel
       ? scene.rooms.find((r) => r.levelId === walkLevel && Math.hypot(r.centroid.x - scene.spawn.position.x, r.centroid.z - scene.spawn.position.z) < 0.01)
       : [...scene.rooms].filter((x) => x.levelId === walkLevel && x.program !== "balcony").sort((a, b) => b.computedAreaM2 - a.computedAreaM2)[0];
-    setWalkStart(spawnRoom ? viewFrom(spawnRoom) : scene.spawn);
+    setWalkStart(spawnRoom ? viewFrom(scene, spawnRoom) : scene.spawn);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene.dossierHash, walkLevel]);
   useEffect(() => {
     if (mode !== "walk" || !props.jumpTo) return;
     const r = scene.rooms.find((x) => x.id === props.jumpTo!.roomId);
-    if (r) setWalkStart(viewFrom(r));
+    if (r) setWalkStart(viewFrom(scene, r));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.jumpTo?.n]);
   const showSite = mode !== "plan" && scene.levels.some((l) => visibleLevels.has(l.id) && l.elevationM >= -0.01);
@@ -306,7 +306,7 @@ export default function Viewer3D(props: ViewerProps) {
         {mode === "plan" ? <OrthographicCamera makeDefault near={0.1} far={500} position={[0, 50, 0]} /> : <PerspectiveCamera makeDefault fov={tourShot?.fov ?? (mode === "walk" ? 70 : 42)} near={0.05} far={500} />}
         <Lighting mood={mood} interior={interior} />
         <Exposure value={mode === "plan" ? 1.1 : tourShot?.outdoor ? 1.1 : interior ? 1.45 : mood === "dusk" ? 1.0 : 1.2} />
-        {mode !== "plan" && mood !== "dusk" && <Sky distance={4000} sunPosition={[10, 18, 8]} turbidity={5} rayleigh={0.9} mieCoefficient={0.004} mieDirectionalG={0.8} />}
+        {mode !== "plan" && mood !== "dusk" && <SkyDome />}
         {tourRoom && !tourShot?.outdoor && <RoomLights room={tourRoom} />}
         {/* ambient occlusion grounds furniture and darkens corners; SMAA replaces MSAA inside the composer */}
         {mode !== "plan" && (
@@ -348,7 +348,7 @@ export default function Viewer3D(props: ViewerProps) {
       </Canvas>
       {tourShot && (
         <>
-          <div ref={captionRef} className={`pointer-events-none absolute left-0 right-0 bottom-0 bg-gradient-to-t from-black/70 via-black/30 to-transparent ${props.capture ? "px-14 pb-12 pt-24" : "px-8 pb-8 pt-16"}`} style={{ opacity: 0 }} data-testid="tour-caption">
+          <div ref={captionRef} className={`pointer-events-none absolute left-0 right-0 bottom-0 bg-gradient-to-t from-black/70 via-black/30 to-transparent ${props.capture ? "px-14 pb-24 pt-24" : "px-8 pb-8 pt-16"}`} style={{ opacity: 0 }} data-testid="tour-caption">
             <div className={`text-[10px] uppercase tracking-[0.3em] text-champagne-300 ${props.capture ? "text-xs" : ""}`}>{tourShot.kind === "room" ? (tourShot.outdoor ? "Outside" : "Inside") : tourShot.kind === "floor" ? "Floor plan in 3D" : "Walkthrough"}</div>
             <div className={`font-light text-white ${props.capture ? "text-4xl mt-1" : "text-2xl"}`}>{tourShot.title}</div>
             {tourShot.subtitle && <div className={`text-stone-200 ${props.capture ? "text-lg mt-1" : "text-sm"}`}>{tourShot.subtitle}</div>}
@@ -362,4 +362,15 @@ export default function Viewer3D(props: ViewerProps) {
       {scene.demo && <div className="pointer-events-none absolute top-2 left-1/2 -translate-x-1/2 chip chip-inferred bg-stone-950/80">DEMO UNIT — not an extracted project</div>}
     </div>
   );
+}
+
+/** A clear daytime sky: a gradient dome inside the far plane, from a pale haze at the horizon to blue overhead. */
+function SkyDome() {
+  const mat = useMemo(() => new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false, toneMapped: false,
+    uniforms: { top: { value: new THREE.Color("#5f93c9") }, mid: { value: new THREE.Color("#a9c8e4") }, horizon: { value: new THREE.Color("#e4ecef") } },
+    vertexShader: "varying vec3 vDir; void main() { vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
+    fragmentShader: "uniform vec3 top; uniform vec3 mid; uniform vec3 horizon; varying vec3 vDir; void main() { float h = max(vDir.y, 0.0); vec3 c = mix(horizon, mid, smoothstep(0.0, 0.18, h)); c = mix(c, top, smoothstep(0.18, 0.75, h)); gl_FragColor = vec4(c, 1.0); }",
+  }), []);
+  return <mesh material={mat} renderOrder={-1} frustumCulled={false}><sphereGeometry args={[420, 32, 16]} /></mesh>;
 }

@@ -116,12 +116,25 @@ export function roomCamera(scene: PropertySceneGraph, r: SceneRoom): { x: number
         const pts = grid(m).filter((p) => roomy(p, m));
         if (pts.length < 2) continue;
         const byHouse = [...pts].sort((a, c) => Math.hypot(a.x - hx, a.y - hy) - Math.hypot(c.x - hx, c.y - hy));
-        const near = byHouse[0];
-        const far = [...pts].filter((p) => seen(near, p)).sort((a, c) => Math.hypot(c.x - near.x, c.y - near.y) - Math.hypot(a.x - near.x, a.y - near.y))[0];
-        if (far && Math.hypot(far.x - near.x, far.y - near.y) > 2.5) return { x: near.x, y: near.y, lookX: far.x, lookY: far.y, lookH: 1.1 };
+        // near the house, looking out: score each pair by length and by how squarely it points away from the house
+        let pick: { near: Vec2; far: Vec2; s: number } | null = null;
+        for (const near of byHouse.slice(0, 6)) {
+          const ax = near.x - hx, ay = near.y - hy, al = Math.hypot(ax, ay) || 1;
+          for (const far of pts) {
+            const L = Math.hypot(far.x - near.x, far.y - near.y);
+            if (L < 2.5 || !seen(near, far)) continue;
+            const away = ((far.x - near.x) * ax + (far.y - near.y) * ay) / (L * al);
+            if (away < 0.35) continue;
+            const sc = Math.min(L, 10) + away * 4;
+            if (!pick || sc > pick.s) pick = { near, far, s: sc };
+          }
+        }
+        if (pick) return { x: pick.near.x, y: pick.near.y, lookX: pick.far.x, lookY: pick.far.y, lookH: 1.2 };
       }
     }
   }
+  /** a target height that keeps the view within ~12 degrees of level from eye height (1.6 m) */
+  const gentle = (dist: number) => Math.max(0.7, Math.min(1.35, 1.6 - dist * 0.21));
   const furniture = scene.pieces
     // pendants hanging into head height count as obstacles too (a lamp shade filling the frame)
     .filter((p) => p.levelId === r.levelId && (p.elementKind === "furniture" || (p.elementKind === "light" && (p.shape.type === "box" ? p.shape.center.y - p.shape.size.y / 2 : p.shape.y) < E + 2.4)))
@@ -155,15 +168,21 @@ export function roomCamera(scene: PropertySceneGraph, r: SceneRoom): { x: number
         })
         .filter((c) => c.dist > 1.8 && c.depth > 2.4)
         .sort((a, c) => Math.min(c.dist, 7.5) + Math.min(c.depth, 9) * 0.3 - (Math.min(a.dist, 7.5) + Math.min(a.depth, 9) * 0.3))[0];
-      if (best) return { x: best.p.x, y: best.p.y, lookX: focus.x, lookY: focus.y, lookH: 0.7 };
+      if (best) return { x: best.p.x, y: best.p.y, lookX: focus.x, lookY: focus.y, lookH: gentle(best.dist) };
     }
     // tight rooms: the spot with the most room around it that still sees the furniture, looking at it
     const gap = (p: Vec2) => Math.min(1.2, ...obstacles.map((f) => Math.max(Math.abs(p.x - f.x) - f.w / 2, Math.abs(p.y - f.y) - f.d / 2)));
     const fallback = grid(0.3, 9)
       .filter((p) => roomy(p, 0.3) && seen(p, focus) && Math.hypot(p.x - focus.x, p.y - focus.y) > 1.2)
-      .map((p) => ({ p, score: gap(p) * 3 + Math.min(Math.hypot(p.x - focus.x, p.y - focus.y), 6) * 0.5 }))
+      .map((p) => ({ p, score: gap(p) * 2 + Math.min(Math.hypot(p.x - focus.x, p.y - focus.y), 6) * 1.2 }))
       .sort((a, c) => c.score - a.score)[0];
-    if (fallback) return { x: fallback.p.x, y: fallback.p.y, lookX: focus.x, lookY: focus.y, lookH: 0.7 };
+    if (fallback) {
+      // look past the furniture to the far side of the room, not down onto it
+      const d0 = Math.hypot(fallback.p.x - focus.x, fallback.p.y - focus.y) || 1;
+      const u = { x: (focus.x - fallback.p.x) / d0, y: (focus.y - fallback.p.y) / d0 };
+      const far = Math.max(d0, reach(fallback.p, u) - 0.3);
+      return { x: fallback.p.x, y: fallback.p.y, lookX: fallback.p.x + u.x * far, lookY: fallback.p.y + u.y * far, lookH: gentle(far) };
+    }
   }
   const vp = roomViewpoint(r.polygon);
   const yaw = (vp.yawDeg * Math.PI) / 180;

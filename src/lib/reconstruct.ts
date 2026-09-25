@@ -23,6 +23,7 @@ import { rasterize, offsetGrid, subtract, outlines, bboxOf as bboxOfPolys } from
 import {
   emitParking, emitPlates, emitPool, emitRamp, emitSite, emitStair, emitSunken, isOutdoor, stairPlans, storeys,
   PLATE_TOP, type Emit, type Storey,
+  emitScreens, emitPergola,
 } from "./structure";
 export { levelsForSelection };
 
@@ -68,13 +69,15 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
     return m.id;
   };
   /** the documented finish for a surface of a room (room, then its program, then what its name says it is), else a named default */
+  const levelOfRoom = new Map(d.levels.flatMap((l) => l.rooms.map((r) => [r.id, l.name] as const)));
   const useMat = (surface: Surface, room: Room | undefined, fallback: string) => {
-    let m = resolveMaterial(d, surface, room);
+    const ln = room ? levelOfRoom.get(room.id) : undefined;
+    let m = resolveMaterial(d, surface, room, ln);
     if (!m && room) {
       const kind = roomKind(room);
       const prog = KIND_PROGRAM[kind];
       // staff and service rooms keep plain finishes rather than borrowing the principal rooms'
-      if (prog && prog !== room.program) m = resolveMaterial(d, surface, { ...room, program: prog });
+      if (prog && prog !== room.program) m = resolveMaterial(d, surface, { ...room, program: prog }, ln);
     }
     return m ? addMat(m) : auto(fallback);
   };
@@ -393,6 +396,8 @@ export function reconstruct(d: PropertyDossier): PropertySceneGraph {
   // floor plates, slab edges and roofs; then the plot around the house
   const ext = d.exterior;
   emitPlates(e, st, { overhang: ext?.overhangM ?? (ext?.slabEdges === "none" ? 0 : 0.35), fascia: ext?.slabEdges !== "none", voids });
+  emitScreens(e, st, ext?.screensOn ?? []);
+  if (ext?.pergola) emitPergola(e, st);
   emitSite(e, st, d);
 
   // wall tops are drawn as a dark cut line in cut-away views (scene/geometry.ts)

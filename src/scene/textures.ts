@@ -5,7 +5,7 @@
 // Geometry UVs are in metres, so `metres` is the real size one texture repeat covers.
 import * as THREE from "three";
 
-type Pattern = { kind: "stone" | "wood" | "chevron" | "weave" | "carpet" | "plaster" | "paving"; metres: number };
+type Pattern = { kind: "stone" | "marble" | "wood" | "chevron" | "weave" | "carpet" | "plaster" | "paving"; metres: number };
 
 export function patternFor(name: string, surface: "floor" | "wall" | "other"): Pattern | null {
   const n = name.toLowerCase();
@@ -15,6 +15,8 @@ export function patternFor(name: string, surface: "floor" | "wall" | "other"): P
   if (/carpet|rug/.test(n)) return { kind: "carpet", metres: 1 };
   if (/paver|paving|brick/.test(n)) return { kind: "paving", metres: 1.2 };
   if (/grasscloth|wallcovering|textured/.test(n)) return { kind: "weave", metres: 0.6 };
+  // veined marble on counters, islands and splashbacks (and any marble whose name says it is veined)
+  if (/marble/.test(n) && (surface !== "floor" || /vein/.test(n))) return { kind: "marble", metres: 1.6 };
   if (/marble|stone|tile|porcelain|travertine|limestone|terrazzo|concrete|cement/.test(n)) return surface === "floor" ? { kind: "stone", metres: 2.4 } : { kind: "plaster", metres: 2 };
   if (surface === "wall") return { kind: "plaster", metres: 2 };
   return null;
@@ -64,6 +66,26 @@ export function detailTexture(p: Pattern): THREE.Texture {
     g.lineWidth = 1.2;
     for (let y = 0; y <= S; y += th) { g.beginPath(); g.moveTo(0, y); g.lineTo(S, y); g.stroke(); }
     for (let y = 0; y < S; y += th) for (let x = 0; x <= S; x += tw) { g.beginPath(); g.moveTo(x, y); g.lineTo(x, y + th); g.stroke(); }
+  } else if (p.kind === "marble") {
+    // bold grey veins that drift across the slab, with fine branches
+    const vein = (w: number, a: number, col: string) => {
+      g.globalAlpha = a;
+      g.strokeStyle = col;
+      g.lineWidth = w;
+      g.beginPath();
+      let x = -40 + r() * S * 0.3, y = r() * S;
+      g.moveTo(x, y);
+      while (x < S + 40) {
+        const nx = x + 30 + r() * 60, ny = y + (r() - 0.45) * 70;
+        g.quadraticCurveTo(x + (nx - x) / 2 + (r() - 0.5) * 30, y + (ny - y) / 2 + (r() - 0.5) * 30, nx, ny);
+        x = nx; y = ny;
+      }
+      g.stroke();
+    };
+    for (let i = 0; i < 3; i++) vein(2 + r() * 3, 0.3, "#80828a");
+    for (let i = 0; i < 10; i++) vein(0.5 + r() * 1, 0.25, "#9a9ca3");
+    for (let i = 0; i < 20; i++) vein(0.4, 0.2, "#b9bbc0");
+    g.globalAlpha = 1;
   } else if (p.kind === "wood") {
     // 0.19 m planks, staggered ends, grain streaks
     const pw = 0.19 * pxPerM;
@@ -93,14 +115,15 @@ export function detailTexture(p: Pattern): THREE.Texture {
     g.save();
     for (let col = -1; col < S / pl + 1; col++) {
       for (let row = -2; row < S / pw + 2; row++) {
-        const v = 222 + Math.floor(r() * 30);
-        g.fillStyle = `rgb(${v},${v - 3},${v - 7})`;
+        const v = 200 + Math.floor(r() * 52);
+        g.fillStyle = `rgb(${v},${v - 4},${v - 10})`;
         g.save();
         const cx = col * pl * 0.72, cy = row * pw * 1.42;
         g.translate(cx, cy);
         g.rotate((col % 2 ? 1 : -1) * Math.PI / 4);
         g.fillRect(0, 0, pl * 0.5, pw);
-        g.strokeStyle = "rgba(90,70,50,0.4)";
+        g.strokeStyle = "rgba(80,60,40,0.6)";
+        g.lineWidth = 1.5;
         g.strokeRect(0, 0, pl * 0.5, pw);
         g.restore();
       }
