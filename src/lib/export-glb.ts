@@ -24,6 +24,7 @@ export function exportGlb(g: PropertySceneGraph, opts: { includeInferred?: boole
       name: m.name,
       pbrMetallicRoughness: { baseColorFactor: [r, gg, b, m.opacity], metallicFactor: m.metalness, roughnessFactor: m.roughness },
       ...(m.opacity < 1 ? { alphaMode: "BLEND", doubleSided: true } : {}),
+      ...(m.emissive ? { emissiveFactor: hexToLinear(m.emissive) } : {}),
       extras: { inferred: m.inferred },
     };
   });

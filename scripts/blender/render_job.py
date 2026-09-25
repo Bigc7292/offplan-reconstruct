@@ -54,7 +54,13 @@ async def main():
         prev = [x for x in json.load(open(index_path))["shots"] if x["name"] not in {d["name"] for d in done}]
     order = {s["name"]: i for i, s in enumerate(shots)}
     all_shots = sorted(prev + done, key=lambda x: order.get(x["name"], 99))
+    scene_hash = None
+    try:
+        scene_hash = json.load(open(os.path.join(job_dir, "scene-graph.json")))["dossierHash"]
+    except Exception:
+        pass
     json.dump({
+        "dossierHash": scene_hash,  # the model version rendered: the app hides renders of an older model
         "renderedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "engine": "Blender Cycles via the Blender MCP",
         "note": "Rendered from the reconstructed model. Colours are the brochure's; stone joints, wood planks and lighting are illustrative.",

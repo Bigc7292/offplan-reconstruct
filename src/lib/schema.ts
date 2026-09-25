@@ -422,6 +422,7 @@ export type SceneRoom = {
   labelPos: Vec3;
   areaM2: number; // what the UI shows: documented when present, else computed
   computedAreaM2: number;
+  printedDims?: string;
   documentedAreaM2?: number;
   ceilingHeightM: number;
   ceilingInferred: boolean;

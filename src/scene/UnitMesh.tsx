@@ -4,7 +4,7 @@ import { useEffect, useMemo } from "react";
 import * as THREE from "three";
 import type { ThreeEvent } from "@react-three/fiber";
 import type { PropertySceneGraph, ScenePiece } from "@/lib/schema";
-import { buildGroups, type MeshGroup } from "./geometry";
+import { buildGroups, type MeshGroup, type SectionCut } from "./geometry";
 import { detailTexture, patternFor } from "./textures";
 
 export type PickInfo = { piece: ScenePiece; pieceIndex: number; point: THREE.Vector3 };
@@ -38,6 +38,11 @@ export function useSceneMaterials(scene: PropertySceneGraph, jobId: string) {
         side: glass ? THREE.DoubleSide : THREE.FrontSide,
         envMapIntensity: glass ? 1.4 : 0.9,
       });
+      if (m.emissive) {
+        base.emissive = new THREE.Color(m.emissive);
+        base.emissiveIntensity = m.emissiveIntensity ?? 1;
+        base.toneMapped = true;
+      }
       const kinds = usedOn.get(m.id) ?? new Set<string>();
       const pattern = patternFor(m.name, kinds.has("floor") ? "floor" : kinds.has("wall") ? "wall" : "other");
       if (pattern && !m.textureAssetPath) base.map = detailTexture(pattern);
@@ -48,10 +53,12 @@ export function useSceneMaterials(scene: PropertySceneGraph, jobId: string) {
         tex.colorSpace = THREE.SRGBColorSpace;
         base.map = tex;
       }
-      // inferred geometry: same finish with a faint amber cast so it reads as "not attested"
+      // inferred geometry: same finish with a faint amber cast so it reads as "not attested" (review views only)
       const inferred = base.clone();
-      inferred.emissive = new THREE.Color("#d9a441");
-      inferred.emissiveIntensity = 0.12;
+      if (!m.emissive) {
+        inferred.emissive = new THREE.Color("#d9a441");
+        inferred.emissiveIntensity = 0.1;
+      }
       map.set(m.id, { base, inferred });
     }
     return map;
@@ -59,7 +66,7 @@ export function useSceneMaterials(scene: PropertySceneGraph, jobId: string) {
 }
 
 export function UnitMesh({
-  scene, jobId, showInferred, showCeilings, visibleLevels, onPick, onHover,
+  scene, jobId, showInferred, showCeilings, visibleLevels, onPick, onHover, cut, tint = true,
 }: {
   scene: PropertySceneGraph;
   jobId: string;
@@ -68,8 +75,14 @@ export function UnitMesh({
   visibleLevels: Set<string>;
   onPick?: (p: PickInfo, e: ThreeEvent<MouseEvent>) => void;
   onHover?: (p: PickInfo | null) => void;
+  /** draw one storey as a section, its walls cut at a height */
+  cut?: SectionCut | null;
+  /** tint inferred pieces amber (review views); presentation views draw everything in its own finish */
+  tint?: boolean;
 }) {
-  const groups = useMemo(() => buildGroups(scene), [scene]);
+  const cutKey = cut ? `${cut.levelId}@${cut.y}` : "";
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const groups = useMemo(() => buildGroups(scene, cut ?? undefined), [scene, cutKey]);
   const geos = useMemo(() => groups.map(toGeometry), [groups]);
   const mats = useSceneMaterials(scene, jobId);
   useEffect(() => () => geos.forEach((g) => g.dispose()), [geos]);
@@ -94,7 +107,7 @@ export function UnitMesh({
           <mesh
             key={g.key}
             geometry={geos[i]}
-            material={g.inferred ? m.inferred : m.base}
+            material={g.inferred && tint ? m.inferred : m.base}
             castShadow={!glass && g.layer !== "ceiling"}
             receiveShadow={!glass}
             renderOrder={glass ? 2 : 0}

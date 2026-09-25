@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { Canvas, useThree } from "@react-three/fiber";
-import { ContactShadows, Environment, Html, Lightformer, OrbitControls, OrthographicCamera, PerspectiveCamera } from "@react-three/drei";
+import { ContactShadows, Environment, Html, Lightformer, OrbitControls, OrthographicCamera, PerspectiveCamera, Sky } from "@react-three/drei";
 import { EffectComposer, N8AO, SMAA } from "@react-three/postprocessing";
 import type { PropertySceneGraph, SceneRoom, Vec3 } from "@/lib/schema";
 import { UnitMesh, type PickInfo } from "@/scene/UnitMesh";
@@ -21,18 +21,54 @@ function viewFrom(r: SceneRoom): { position: Vec3; yawDeg: number } {
   return { position: { x: vp.x, y: r.centroid.y, z: -vp.y }, yawDeg: vp.yawDeg };
 }
 
-/** Ground around the building at street level: lawn with a paved apron, so the villa sits on a site. */
+/** Ground beyond the plot (the builder draws the plot itself: paving, lawn, boundary, pool), with a hole where the plot is. */
 function Site({ scene, dusk }: { scene: PropertySceneGraph; dusk: boolean }) {
   const street = [...scene.levels].sort((a, b) => Math.abs(a.elevationM) - Math.abs(b.elevationM))[0];
-  const y = (street?.elevationM ?? 0) - 0.07;
+  const y = (street?.elevationM ?? 0) - 0.12;
   const b = scene.bounds;
   const cx = (b.min.x + b.max.x) / 2, cz = (b.min.z + b.max.z) / 2;
-  // lawn only: paving, planting and boundaries are not in the plans, so none are drawn
+  const shape = useMemo(() => {
+    const sh = new THREE.Shape();
+    sh.moveTo(cx - 300, -cz - 300); sh.lineTo(cx + 300, -cz - 300); sh.lineTo(cx + 300, -cz + 300); sh.lineTo(cx - 300, -cz + 300); sh.closePath();
+    // plan-space bbox of the plot's own ground (paving and lawn); the pool and sunken seating sit inside it
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of scene.pieces) {
+      if (p.elementKind !== "site" || p.shape.type !== "poly" || !/paving|lawn/.test(p.elementId)) continue;
+      for (const v of p.shape.polygon) { x0 = Math.min(x0, v.x); y0 = Math.min(y0, v.y); x1 = Math.max(x1, v.x); y1 = Math.max(y1, v.y); }
+    }
+    if (isFinite(x0)) {
+      const hole = new THREE.Path();
+      hole.moveTo(x0 + 0.05, y0 + 0.05); hole.lineTo(x0 + 0.05, y1 - 0.05); hole.lineTo(x1 - 0.05, y1 - 0.05); hole.lineTo(x1 - 0.05, y0 + 0.05); hole.closePath();
+      sh.holes.push(hole);
+    }
+    return sh;
+  }, [scene, cx, cz]);
+  // shape is in plan space (x, plan y); rotating -90° about x maps plan y to -z
   return (
-    <mesh rotation-x={-Math.PI / 2} position={[cx, y - 0.01, cz]} receiveShadow>
-      <planeGeometry args={[400, 400]} />
-      <meshStandardMaterial color={dusk ? "#3d4a33" : "#8aa06e"} roughness={1} />
+    <mesh rotation-x={-Math.PI / 2} position={[0, y, 0]} receiveShadow>
+      <shapeGeometry args={[shape]} />
+      <meshStandardMaterial color={dusk ? "#39432f" : "#8e9b78"} roughness={1} />
     </mesh>
+  );
+}
+
+/** Warm light from a room's ceiling fittings, for eye-level shots under a ceiling. */
+function RoomLights({ room }: { room: SceneRoom }) {
+  const pts = useMemo(() => {
+    const xs = room.polygon.map((p) => p.x), ys = room.polygon.map((p) => p.y);
+    const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+    const nx = Math.max(1, Math.min(2, Math.round((x1 - x0) / 3.5))), ny = Math.max(1, Math.min(2, Math.round((y1 - y0) / 3.5)));
+    const out: Array<[number, number]> = [];
+    for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) out.push([x0 + ((x1 - x0) * (i + 0.5)) / nx, y0 + ((y1 - y0) * (j + 0.5)) / ny]);
+    return out;
+  }, [room]);
+  const h = room.centroid.y + room.ceilingHeightM - 0.35;
+  return (
+    <>
+      {pts.map(([x, y], i) => (
+        <pointLight key={i} position={[x, h, -y]} intensity={9 / pts.length + 3} distance={9} decay={1.6} color="#ffe2b8" />
+      ))}
+    </>
   );
 }
 
@@ -223,7 +259,8 @@ export default function Viewer3D(props: ViewerProps) {
     const sel = scene.levels.find((l) => l.id === levelId);
     return new Set(scene.levels.filter((l) => !sel || l.elevationM <= sel.elevationM + 1e-6).map((l) => l.id));
   }, [scene, levelId, tourShot]);
-  const interior = mode === "walk" || tourShot?.kind === "room";
+  const interior = mode === "walk" || (tourShot?.kind === "room" && !tourShot.outdoor);
+  const tourRoom = tourShot?.roomId ? scene.rooms.find((r) => r.id === tourShot.roomId) : undefined;
   const walkLevel = levelId === "all" ? scene.spawn.levelId : levelId;
   const [walkStart, setWalkStart] = useState<{ position: Vec3; yawDeg: number }>(scene.spawn);
   useEffect(() => {
@@ -259,7 +296,7 @@ export default function Viewer3D(props: ViewerProps) {
         frameloop={props.capture ? "demand" : "always"}
         shadows
         dpr={[1, compact ? 1.5 : 2]}
-        gl={{ antialias: true, preserveDrawingBuffer: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: mood === "dusk" ? 0.9 : 1.05 }}
+        gl={{ antialias: true, preserveDrawingBuffer: true, toneMapping: THREE.AgXToneMapping, toneMappingExposure: mood === "dusk" ? 1.0 : 1.15 }}
         onCreated={({ gl }) => { if (props.canvasRef) props.canvasRef.current = gl.domElement; }}
         onPointerMissed={() => !measuring && mode !== "tour" && props.onSelect?.(null)}
       >
@@ -268,7 +305,9 @@ export default function Viewer3D(props: ViewerProps) {
         {showSite && <Site scene={scene} dusk={mood === "dusk"} />}
         {mode === "plan" ? <OrthographicCamera makeDefault near={0.1} far={500} position={[0, 50, 0]} /> : <PerspectiveCamera makeDefault fov={tourShot?.fov ?? (mode === "walk" ? 70 : 42)} near={0.05} far={500} />}
         <Lighting mood={mood} interior={interior} />
-        <Exposure value={mode === "plan" ? 1.0 : interior ? 0.92 : mood === "dusk" ? 0.9 : 1.0} />
+        <Exposure value={mode === "plan" ? 1.1 : tourShot?.outdoor ? 1.1 : interior ? 1.45 : mood === "dusk" ? 1.0 : 1.2} />
+        {mode !== "plan" && mood !== "dusk" && <Sky distance={4000} sunPosition={[10, 18, 8]} turbidity={5} rayleigh={0.9} mieCoefficient={0.004} mieDirectionalG={0.8} />}
+        {tourRoom && !tourShot?.outdoor && <RoomLights room={tourRoom} />}
         {/* ambient occlusion grounds furniture and darkens corners; SMAA replaces MSAA inside the composer */}
         {mode !== "plan" && (
           <EffectComposer multisampling={0}>
@@ -276,7 +315,9 @@ export default function Viewer3D(props: ViewerProps) {
             <SMAA />
           </EffectComposer>
         )}
-        <UnitMesh scene={scene} jobId={jobId} showInferred={showInferred} showCeilings={tourShot ? tourShot.ceilings : mode === "walk"} visibleLevels={visibleLevels} onPick={onPick} onHover={setHover} />
+        <UnitMesh scene={scene} jobId={jobId} showInferred={showInferred} showCeilings={tourShot ? tourShot.ceilings : mode === "walk"} visibleLevels={visibleLevels} onPick={onPick} onHover={setHover}
+          cut={tourShot ? tourShot.cut : mode === "dollhouse" && levelId !== "all" ? { levelId, y: (scene.levels.find((l) => l.id === levelId)?.elevationM ?? 0) + 1.2 } : null}
+          tint={mode === "dollhouse" || mode === "plan"} />
         <RoomHighlight scene={scene} elementId={selectedId} pulseKey={props.pulseKey} />
         {overlay && mode === "plan" && <Overlay o={overlay} opacity={props.overlayOpacity ?? 0.55} />}
         <MeasureTool m={measure} />
@@ -308,7 +349,7 @@ export default function Viewer3D(props: ViewerProps) {
       {tourShot && (
         <>
           <div ref={captionRef} className={`pointer-events-none absolute left-0 right-0 bottom-0 bg-gradient-to-t from-black/70 via-black/30 to-transparent ${props.capture ? "px-14 pb-12 pt-24" : "px-8 pb-8 pt-16"}`} style={{ opacity: 0 }} data-testid="tour-caption">
-            <div className={`text-[10px] uppercase tracking-[0.3em] text-champagne-300 ${props.capture ? "text-xs" : ""}`}>{tourShot.kind === "room" ? "Inside" : tourShot.kind === "floor" ? "Floor" : "Walkthrough"}</div>
+            <div className={`text-[10px] uppercase tracking-[0.3em] text-champagne-300 ${props.capture ? "text-xs" : ""}`}>{tourShot.kind === "room" ? (tourShot.outdoor ? "Outside" : "Inside") : tourShot.kind === "floor" ? "Floor plan in 3D" : "Walkthrough"}</div>
             <div className={`font-light text-white ${props.capture ? "text-4xl mt-1" : "text-2xl"}`}>{tourShot.title}</div>
             {tourShot.subtitle && <div className={`text-stone-200 ${props.capture ? "text-lg mt-1" : "text-sm"}`}>{tourShot.subtitle}</div>}
           </div>

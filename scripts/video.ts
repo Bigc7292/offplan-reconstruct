@@ -4,13 +4,16 @@
 //   npm run video -- <jobId> [--fps 25] [--size 1280x720] [--out file.mp4]   (app must be running)
 //
 // Also writes exports/walkthrough-poster.jpg and exports/walkthrough-contact.jpg (one frame per shot),
-// which is what the critic agent looks at, since it cannot watch a video.
+// which is what the critic agent looks at, since it cannot watch a video, and exports/stills/ (one clean,
+// uncaptioned frame per shot, listed in stills.json) for the buyer's share page.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { launchBrowser } from "./lib/browser";
 import sharp from "sharp";
+import { buildTour } from "../src/lib/tour";
+import type { PropertySceneGraph } from "../src/lib/schema";
 
 const args = process.argv.slice(2);
 const jobId = args.find((a, i) => !a.startsWith("--") && !args[i - 1]?.startsWith("--"));
@@ -66,6 +69,26 @@ try {
     if (state.caption > 0.95 && !shotFrames.some((s) => s.index === state.index)) shotFrames.push({ index: state.index, file });
   }
   process.stdout.write("\n");
+  // clean stills of the current model for the share page: the middle of each shot, captions hidden
+  const scene = JSON.parse(fs.readFileSync(path.join(DATA, jobId, "scene-graph.json"), "utf8")) as PropertySceneGraph;
+  const shots = buildTour(scene);
+  const stillsDir = path.join(path.dirname(OUT), "stills");
+  fs.rmSync(stillsDir, { recursive: true, force: true });
+  fs.mkdirSync(stillsDir, { recursive: true });
+  await page.addStyleTag({ content: "[data-testid=tour-caption]{display:none!important}" });
+  const stills: Array<{ file: string; kind: string; title: string; subtitle?: string }> = [];
+  let acc = 0;
+  for (const [i, sh] of shots.entries()) {
+    const mid = acc + sh.duration * 0.55;
+    acc += sh.duration;
+    await page.evaluate((sec) => (window as unknown as { __offplanTour: { step: (t: number) => Promise<unknown> } }).__offplanTour.step(sec), mid);
+    await page.waitForTimeout(300);
+    await page.evaluate((sec) => (window as unknown as { __offplanTour: { step: (t: number) => Promise<unknown> } }).__offplanTour.step(sec), mid);
+    const name = `${String(i).padStart(2, "0")}.jpg`;
+    await page.screenshot({ path: path.join(stillsDir, name), type: "jpeg", quality: 88 });
+    stills.push({ file: `exports/stills/${name}`, kind: sh.kind, title: sh.title, ...(sh.subtitle ? { subtitle: sh.subtitle } : {}) });
+  }
+  fs.writeFileSync(path.join(stillsDir, "..", "stills.json"), JSON.stringify({ dossierHash: scene.dossierHash, stills }, null, 2));
   if (errors.length) console.log(`Browser errors:\n  ${errors.slice(0, 5).join("\n  ")}`);
 } finally {
   await browser.close();

@@ -10,7 +10,7 @@ type Pattern = { kind: "stone" | "wood" | "chevron" | "weave" | "carpet" | "plas
 export function patternFor(name: string, surface: "floor" | "wall" | "other"): Pattern | null {
   const n = name.toLowerCase();
   if (/grass|turf|lawn|water|pool|glass|glazing|default|proxy|frame|slab/.test(n)) return null;
-  if (/chevron|herringbone/.test(n)) return { kind: "chevron", metres: 1.2 };
+  if (/chevron|herringbone/.test(n)) return { kind: "chevron", metres: 0.6 };
   if (/wood|oak|walnut|teak|parquet|timber|veneer|plank/.test(n)) return surface === "floor" ? { kind: "wood", metres: 2.4 } : { kind: "weave", metres: 1.2 };
   if (/carpet|rug/.test(n)) return { kind: "carpet", metres: 1 };
   if (/paver|paving|brick/.test(n)) return { kind: "paving", metres: 1.2 };

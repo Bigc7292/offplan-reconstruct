@@ -19,7 +19,7 @@ export function ModelExplorer({ jobId, scene, dossier, sources, share }: Props) 
   const selection = useStudio((s) => s.selection);
   const pulse = useStudio((s) => s.pulse);
   const [mode, setMode] = useState<ViewMode>("dollhouse");
-  const renders = useRenders(jobId);
+  const renders = useRenders(jobId, scene.dossierHash);
   // buyers opening a shared link land on the rendered views first; the 3D model is one click away
   const [gallery, setGallery] = useState<boolean | null>(null);
   const showGallery = !!renders && (gallery ?? !!share);

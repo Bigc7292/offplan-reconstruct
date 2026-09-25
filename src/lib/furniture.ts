@@ -335,14 +335,21 @@ export function furnitureParts(f: FurnitureLike, ceilingH = 2.85): Part[] {
       return P;
     }
     case "pendant":
-      // a drum pendant hanging 0.9 m down from the ceiling
-      add({ dx: 0, dy: 0, w: 0.012, d: 0.012, y0: ceilingH - 0.9, y1: ceilingH, mat: "metal", round: true });
-      add({ dx: 0, dy: 0, w: Math.min(w, 0.55), d: Math.min(w, 0.55), y0: ceilingH - 1.12, y1: ceilingH - 0.9, mat: "light", round: true });
+      // a drum pendant on a drop that keeps its underside above head height (2.1 m or more)
+      {
+        const bottom = Math.max(2.1, ceilingH - 0.85);
+        const dia = Math.min(w, 0.45);
+        add({ dx: 0, dy: 0, w: 0.012, d: 0.012, y0: bottom + 0.18, y1: ceilingH, mat: "metal", round: true });
+        add({ dx: 0, dy: 0, w: dia, d: dia, y0: bottom, y1: bottom + 0.18, mat: "light", round: true });
+      }
       return P;
     case "linear_pendant":
-      for (const sx of [-1, 1]) add({ dx: sx * (w / 2 - 0.1), dy: 0, w: 0.012, d: 0.012, y0: ceilingH - 0.95, y1: ceilingH, mat: "metal" });
-      add({ dx: 0, dy: 0, w, d: 0.1, y0: ceilingH - 1.0, y1: ceilingH - 0.95, mat: "metal" });
-      add({ dx: 0, dy: 0, w: w - 0.04, d: 0.06, y0: ceilingH - 1.012, y1: ceilingH - 1.0, mat: "light" });
+      {
+        const bottom = Math.max(2.1, ceilingH - 0.8);
+        for (const sx of [-1, 1]) add({ dx: sx * (w / 2 - 0.1), dy: 0, w: 0.012, d: 0.012, y0: bottom + 0.05, y1: ceilingH, mat: "metal" });
+        add({ dx: 0, dy: 0, w, d: 0.1, y0: bottom + 0.012, y1: bottom + 0.05, mat: "metal" });
+        add({ dx: 0, dy: 0, w: w - 0.04, d: 0.06, y0: bottom, y1: bottom + 0.012, mat: "light" });
+      }
       return P;
     case "curtain": {
       // a sheer curtain stacked at the side of a window, on a ceiling track

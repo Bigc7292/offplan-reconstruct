@@ -14,7 +14,8 @@
     "cc": "tsx scripts/claude-code.ts",
     "screenshots": "tsx scripts/screenshots.ts",
     "video": "tsx scripts/video.ts",
-    "llm-check": "tsx --env-file=.env.local scripts/llm-check.ts"
+    "llm-check": "tsx --env-file=.env.local scripts/llm-check.ts",
+    "stills": "tsx scripts/tour-stills.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",

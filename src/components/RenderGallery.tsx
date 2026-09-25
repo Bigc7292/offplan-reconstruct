@@ -5,18 +5,19 @@ import { useEffect, useState } from "react";
 import { fileUrl } from "@/lib/client-store";
 
 export type RenderShot = { name: string; kind: "exterior" | "cutaway" | "interior"; title: string; file: string; level?: string; room?: string };
-export type RenderIndex = { renderedAt: string; engine: string; note: string; shots: RenderShot[] };
+export type RenderIndex = { dossierHash?: string; renderedAt: string; engine: string; note: string; shots: RenderShot[] };
 
-export function useRenders(jobId: string) {
+/** Renders of the model, when they were made from this version of it (`dossierHash`): a rebuild makes older ones stale. */
+export function useRenders(jobId: string, dossierHash?: string) {
   const [idx, setIdx] = useState<RenderIndex | null>(null);
   useEffect(() => {
     let live = true;
     fetch(fileUrl(jobId, "renders/index.json"), { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
-      .then((j) => { if (live && j?.shots?.length) setIdx(j); })
+      .then((j) => { if (live && j?.shots?.length && (!dossierHash || j.dossierHash === dossierHash)) setIdx(j); })
       .catch(() => {});
     return () => { live = false; };
-  }, [jobId]);
+  }, [jobId, dossierHash]);
   return idx;
 }
 

@@ -70,10 +70,21 @@ try {
   await sleep(3500);
   await shot(page, "plan");
 
+  // the buyer's share page: the landing view, scrolled, then the interactive model behind it
   await page.goto(`${BASE}/view/${jobId}`);
+  await page.getByTestId("key-facts").waitFor({ timeout: 60_000 }).catch(() => {});
+  await sleep(2500);
+  await shot(page, "share");
+  await page.mouse.wheel(0, 900);
+  await sleep(1200);
+  await shot(page, "share-more");
+  await page.mouse.wheel(0, 1400);
+  await sleep(1200);
+  await shot(page, "share-sources");
+  await page.goto(`${BASE}/view/${jobId}?explore=1`);
   await page.getByTestId("viewer").waitFor();
   await sleep(6000);
-  await shot(page, "share");
+  await shot(page, "share-explore");
   // rendered views (Blender), when the job has them
   if (await page.getByTestId("render-gallery").count()) {
     const thumbs = page.locator("[data-testid=render-gallery] button[title]");
